@@ -1,0 +1,32 @@
+# virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# CS2 demo files (huge, no reason to commit)
+*.dem
+
+# generated artefacts
+data/crosshair.db
+data/*.lgb
+
+# secrets
+.env
+*.env
+
+# macOS
+.DS_Store
+
+# editor
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
