@@ -77,6 +77,7 @@ def cmd_scrape(args):
         max_players        = args.max_players,
         matches_per_player = args.matches_per_player,
         start_offset       = args.start_offset,
+        source             = args.source,
     )
 
 
@@ -260,6 +261,8 @@ def main():
     sp.add_argument("--max-players",        type=int, default=10)
     sp.add_argument("--matches-per-player", type=int, default=20)
     sp.add_argument("--start-offset",       type=int, default=0)
+    sp.add_argument("--source",             choices=["playwright", "api"], default="playwright",
+                    help="demo source: playwright (default) or api (FACEIT Downloads API)")
     sp.set_defaults(fn=cmd_scrape)
 
     sp = sub.add_parser("demo", help="Process one local .dem file")

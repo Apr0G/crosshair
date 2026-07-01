@@ -16,17 +16,18 @@ from pathlib import Path
 
 import db
 import scraper
+import faceit_api
 import extract as extractor
 import feature_extractor
 import state_sampler
 
 
-def process_one(match_id: str, demo_url: str) -> int:
+def process_one(match_id: str, demo_url: str, source=scraper) -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
         demo_path = Path(tmpdir) / f"{match_id}.dem"
 
         print(f"[{match_id}] downloading ...")
-        scraper.download_demo(demo_url, demo_path)
+        source.download_demo(demo_url, demo_path)
 
         print(f"[{match_id}] parsing demo ...")
         tables = extractor.extract(str(demo_path))
@@ -49,12 +50,15 @@ def process_one(match_id: str, demo_url: str) -> int:
         return len(events)
 
 
-def run(min_elo: int = 2500, region: str = "EU", max_players: int = 10, matches_per_player: int = 20, start_offset: int = 0):
+def run(min_elo: int = 2500, region: str = "EU", max_players: int = 10, matches_per_player: int = 20, start_offset: int = 0, source: str = "playwright"):
     db.init_db()
+
+    src = faceit_api if source == "api" else scraper
+    print(f"source: {source}")
 
     total_events = 0
     i = 0
-    for match_id, demo_url in scraper.iter_unprocessed_demos(
+    for match_id, demo_url in src.iter_unprocessed_demos(
         min_elo=min_elo,
         region=region,
         max_players=max_players,
@@ -64,7 +68,7 @@ def run(min_elo: int = 2500, region: str = "EU", max_players: int = 10, matches_
         i += 1
         print(f"\n── match {i}: {match_id} ──")
         try:
-            n = process_one(match_id, demo_url)
+            n = process_one(match_id, demo_url, source=src)
             total_events += n
         except Exception as e:
             print(f"[{match_id}] error: {e}")
@@ -77,10 +81,10 @@ def run(min_elo: int = 2500, region: str = "EU", max_players: int = 10, matches_
     print(f"db: {s['matches_processed']} matches | {s['total_events']} events | {s['total_states']} states")
 
 
-def loop(min_elo: int = 2500, region: str = "EU", interval: int = 3600):
+def loop(min_elo: int = 2500, region: str = "EU", interval: int = 3600, source: str = "playwright"):
     while True:
         try:
-            run(min_elo=min_elo, region=region)
+            run(min_elo=min_elo, region=region, source=source)
         except Exception as e:
             print(f"run failed: {e}")
         print(f"\nsleeping {interval}s ...")
@@ -96,9 +100,10 @@ if __name__ == "__main__":
     parser.add_argument("--loop",               action="store_true")
     parser.add_argument("--interval",           type=int, default=3600)
     parser.add_argument("--start-offset",       type=int, default=0)
+    parser.add_argument("--source",             choices=["playwright", "api"], default="playwright")
     args = parser.parse_args()
 
     if args.loop:
-        loop(args.min_elo, args.region, args.interval)
+        loop(args.min_elo, args.region, args.interval, source=args.source)
     else:
-        run(args.min_elo, args.region, args.max_players, args.matches_per_player, args.start_offset)
+        run(args.min_elo, args.region, args.max_players, args.matches_per_player, args.start_offset, source=args.source)
