@@ -10,6 +10,12 @@
 
 # demo parsing
 awpy>=2.0.2,<3
+# Pinned deliberately. awpy declares `demoparser2>=0.38.0` with NO upper bound, so a
+# fresh resolve takes 0.41.4 — which crashes with an unsigned underflow ("memory
+# allocation of 18446744073709551615 bytes failed") on these demos. 0.41.3 is the
+# newest version that parses them. Do not relax this without re-testing
+# `.venv/bin/python src/main.py demo demos/faceit2.dem` end to end.
+demoparser2==0.41.3
 polars>=1.0.0,<2
 
 # data + ML
