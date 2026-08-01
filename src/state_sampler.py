@@ -9,10 +9,12 @@ Each row is labelled with `round_won_ct` so the snapshots double as training dat
 for the win-probability model.
 """
 import math
+from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
 SAMPLE_INTERVAL   = 64     # ticks between samples (~1 s at 64 tick)
+SNAP_HALF_WINDOW  = 32     # ticks either side of a sample tick to build a snapshot
 C4_TIMER          = 40.0   # seconds bomb burns after plant
 ROUND_TIME_S      = 115.0  # seconds of round clock after freeze time (CS2 competitive)
 SITE_BLOCK_RADIUS = 300.0  # units — smoke/molotov covers the bombsite within this
@@ -189,12 +191,162 @@ def _info_state(snap_ct, snap_t, vis_cache, tick, window_ticks: int = HEARD_WIND
     }
 
 
-def sample_round_states(
+@dataclass
+class RoundContext:
+    """Everything `build_state` needs for one round, precomputed once.
+
+    Splitting this out is what lets a state vector be built at an ARBITRARY tick
+    rather than only on the SAMPLE_INTERVAL grid. Impact attribution needs the state
+    immediately before and after each action; bracketing events between two ~1 Hz
+    samples hands every event inside that second the same win-probability delta.
+    """
+    match_id:     str
+    map_name:     str
+    round_num:    int
+    r_start:      float
+    r_end:        float
+    r_ticks:      "pd.DataFrame"
+    r_smokes:     "pd.DataFrame"
+    r_infernos:   "pd.DataFrame"
+    footsteps_df: object
+    shots_df:     object
+    reloads_df:   object
+    vis_cache:    dict
+    plant_tick:   int | None
+    bomb_xy:      tuple | None
+    round_won_ct: int
+    tick_rate:    int = 64
+    snap_half:    int = SNAP_HALF_WINDOW
+
+
+def build_state(tick: int, ctx: RoundContext) -> dict | None:
+    """State vector at `tick`. None when no usable snapshot exists there.
+
+    Must stay a pure function of (tick, ctx): the attribution work evaluates it at
+    tick-1 and tick+1 around an action, so it cannot depend on iteration order or on
+    anything cached across calls.
+    """
+    tick = int(tick)
+    snap = ctx.r_ticks[(ctx.r_ticks["tick"] >= tick - ctx.snap_half) &
+                       (ctx.r_ticks["tick"] <  tick + ctx.snap_half)]
+    if snap.empty or "name" not in snap.columns:
+        return None
+    # drop_duplicates keeps a genuine single row per player. groupby().last()
+    # takes the last NON-NULL value per column independently, which can pair
+    # one tick's position with another tick's health.
+    snap = snap.sort_values("tick").drop_duplicates(subset="name", keep="last")
+
+    alive   = snap[snap["is_alive"] == True] if "is_alive" in snap.columns else snap
+    snap_ct = alive[alive["side"] == "ct"] if "side" in alive.columns else pd.DataFrame()
+    snap_t  = alive[alive["side"] == "t"]  if "side" in alive.columns else pd.DataFrame()
+
+    alive_ct = len(snap_ct)
+    alive_t  = len(snap_t)
+    if alive_ct == 0 and alive_t == 0:
+        return None
+
+    tick_rate  = ctx.tick_rate
+    plant_tick = ctx.plant_tick
+    bomb_xy    = ctx.bomb_xy
+
+    post_plant        = plant_tick is not None and tick >= plant_tick
+    time_into_round_s = round((tick - ctx.r_start) / tick_rate, 2)
+
+    # Clock the state can actually know. Deriving this from r_end (the round's
+    # ACTUAL end tick) leaks the outcome: short rounds are decisive rounds, so
+    # the model learns "little time left => whoever leads now wins".
+    if post_plant:
+        time_remaining_s = round(max(0.0, C4_TIMER - (tick - plant_tick) / tick_rate), 2)
+    else:
+        time_remaining_s = round(max(0.0, ROUND_TIME_S - time_into_round_s), 2)
+
+    hp_ct    = float(snap_ct["health"].sum()) if "health" in snap_ct.columns else 0.0
+    hp_t     = float(snap_t["health"].sum())  if "health" in snap_t.columns  else 0.0
+    equip_ct = float(snap_ct["current_equip_value"].sum()) if "current_equip_value" in snap_ct.columns else 0.0
+    equip_t  = float(snap_t["current_equip_value"].sum())  if "current_equip_value" in snap_t.columns  else 0.0
+
+    armor_ct   = float(snap_ct["armor_value"].sum()) if "armor_value" in snap_ct.columns else 0.0
+    armor_t    = float(snap_t["armor_value"].sum())  if "armor_value" in snap_t.columns  else 0.0
+    helmets_ct = int(snap_ct["has_helmet"].sum())    if "has_helmet"  in snap_ct.columns else 0
+    helmets_t  = int(snap_t["has_helmet"].sum())     if "has_helmet"  in snap_t.columns  else 0
+
+    ct_spread = _team_spread(snap_ct)
+    t_spread  = _team_spread(snap_t)
+
+    has_defuser = bool(snap_ct["has_defuser"].any()) if "has_defuser" in snap_ct.columns else False
+
+    util_ct = _team_util(snap_ct)
+    util_t  = _team_util(snap_t)
+
+    active_smokes_xy   = _active_xy(ctx.r_smokes, tick)
+    active_infernos_xy = _active_xy(ctx.r_infernos, tick)
+
+    site_smoked  = _site_blocked(bomb_xy, active_smokes_xy)   if post_plant else False
+    site_on_fire = _site_blocked(bomb_xy, active_infernos_xy) if post_plant else False
+
+    min_dist_ct = _min_dist_to_xy(snap_ct, bomb_xy) if post_plant and bomb_xy else None
+    min_dist_t  = _min_dist_to_xy(snap_t,  bomb_xy) if post_plant and bomb_xy else None
+
+    info = _info_state(snap_ct, snap_t, ctx.vis_cache, tick, window_ticks=HEARD_WINDOW)
+
+    ct_names = set(snap_ct["name"].tolist()) if "name" in snap_ct.columns else set()
+    t_names  = set(snap_t["name"].tolist())  if "name" in snap_t.columns  else set()
+    heard_ct = _team_heard_enemy(snap_ct, "t",  tick, ctx.footsteps_df, ctx.shots_df, ctx.reloads_df, enemy_names=t_names)
+    heard_t  = _team_heard_enemy(snap_t,  "ct", tick, ctx.footsteps_df, ctx.shots_df, ctx.reloads_df, enemy_names=ct_names)
+
+    return {
+        "match_id":            ctx.match_id,
+        "map":                 ctx.map_name,
+        "round_num":           ctx.round_num,
+        "tick":                tick,
+        "time_into_round_s":   time_into_round_s,
+        "time_remaining_s":    time_remaining_s,
+        "post_plant":          int(post_plant),
+        "alive_ct":            alive_ct,
+        "alive_t":             alive_t,
+        "total_hp_ct":         round(hp_ct, 1),
+        "total_hp_t":          round(hp_t, 1),
+        "total_armor_ct":      round(armor_ct, 1),
+        "total_armor_t":       round(armor_t, 1),
+        "helmets_ct":          helmets_ct,
+        "helmets_t":           helmets_t,
+        "ct_spread":           None if ct_spread is None else round(ct_spread, 1),
+        "t_spread":            None if t_spread  is None else round(t_spread, 1),
+        "has_defuser":         int(has_defuser),
+        "equip_value_ct":      round(equip_ct),
+        "equip_value_t":       round(equip_t),
+        "smokes_ct":           util_ct["smokes"],
+        "smokes_t":            util_t["smokes"],
+        "flashes_ct":          util_ct["flashes"],
+        "flashes_t":           util_t["flashes"],
+        "he_ct":               util_ct["he"],
+        "he_t":                util_t["he"],
+        "molotovs_ct":         util_ct["molotovs"],
+        "molotovs_t":          util_t["molotovs"],
+        "active_smokes":       len(active_smokes_xy),
+        "active_infernos":     len(active_infernos_xy),
+        "active_smokes_xy":    active_smokes_xy,
+        "active_infernos_xy":  active_infernos_xy,
+        "site_smoked":         int(site_smoked),
+        "site_on_fire":        int(site_on_fire),
+        "min_dist_ct_to_bomb": min_dist_ct,
+        "min_dist_t_to_bomb":  min_dist_t,
+        "ct_spotted_count":    info["ct_spotted_count"],
+        "t_spotted_count":     info["t_spotted_count"],
+        "ct_heard_enemy":      heard_ct,
+        "t_heard_enemy":       heard_t,
+        "round_won_ct":        ctx.round_won_ct,
+    }
+
+
+def iter_round_contexts(
     tables: dict,
     match_id: str,
     map_name: str = "unknown",
     vis_checker=None,
-) -> list[dict]:
+):
+    """Yield a RoundContext per playable round. Shared by the sampler and by any
+    consumer that needs state at arbitrary ticks (impact attribution)."""
     from feature_extractor import _precompute_visibility
 
     rounds_df       = tables.get("rounds",               pd.DataFrame())
@@ -207,10 +359,9 @@ def sample_round_states(
     reloads_df      = tables.get("event_weapon_reload",  None)
 
     if rounds_df.empty or ticks_df.empty:
-        return []
+        return
 
     tick_rate = int(tables.get("tick_rate") or 64)
-    states    = []
 
     # match bomb plants to rounds by tick range since bomb_planted has no round_num
     bomb_info: dict[int, dict] = {}
@@ -281,113 +432,43 @@ def sample_round_states(
 
         vis_cache = _precompute_visibility(r_ticks, vis_checker, smokes_df=r_smokes)
 
-        for tick in range(int(r_start), int(r_end), SAMPLE_INTERVAL):
-            snap = r_ticks[(r_ticks["tick"] >= tick - 32) & (r_ticks["tick"] < tick + 32)]
-            if snap.empty or "name" not in snap.columns:
-                continue
-            # drop_duplicates keeps a genuine single row per player. groupby().last()
-            # takes the last NON-NULL value per column independently, which can pair
-            # one tick's position with another tick's health.
-            snap = snap.sort_values("tick").drop_duplicates(subset="name", keep="last")
+        yield RoundContext(
+            match_id     = match_id,
+            map_name     = map_name,
+            round_num    = rn,
+            r_start      = r_start,
+            r_end        = r_end,
+            r_ticks      = r_ticks,
+            r_smokes     = r_smokes,
+            r_infernos   = r_infernos,
+            footsteps_df = footsteps_df,
+            shots_df     = shots_df,
+            reloads_df   = reloads_df,
+            vis_cache    = vis_cache,
+            plant_tick   = plant_tick,
+            bomb_xy      = bomb_xy,
+            round_won_ct = round_won_ct,
+            tick_rate    = tick_rate,
+        )
 
-            alive   = snap[snap["is_alive"] == True] if "is_alive" in snap.columns else snap
-            snap_ct = alive[alive["side"] == "ct"] if "side" in alive.columns else pd.DataFrame()
-            snap_t  = alive[alive["side"] == "t"]  if "side" in alive.columns else pd.DataFrame()
 
-            alive_ct = len(snap_ct)
-            alive_t  = len(snap_t)
-            if alive_ct == 0 and alive_t == 0:
-                continue
+def sample_round_states(
+    tables: dict,
+    match_id: str,
+    map_name: str = "unknown",
+    vis_checker=None,
+) -> list[dict]:
+    """~1 Hz snapshots across every round — the win-probability training rows.
 
-            post_plant        = plant_tick is not None and tick >= plant_tick
-            time_into_round_s = round((tick - r_start) / tick_rate, 2)
-
-            # Clock the state can actually know. Deriving this from r_end (the round's
-            # ACTUAL end tick) leaks the outcome: short rounds are decisive rounds, so
-            # the model learns "little time left => whoever leads now wins".
-            if post_plant:
-                time_remaining_s = round(max(0.0, C4_TIMER - (tick - plant_tick) / tick_rate), 2)
-            else:
-                time_remaining_s = round(max(0.0, ROUND_TIME_S - time_into_round_s), 2)
-
-            hp_ct    = float(snap_ct["health"].sum()) if "health" in snap_ct.columns else 0.0
-            hp_t     = float(snap_t["health"].sum())  if "health" in snap_t.columns  else 0.0
-            equip_ct = float(snap_ct["current_equip_value"].sum()) if "current_equip_value" in snap_ct.columns else 0.0
-            equip_t  = float(snap_t["current_equip_value"].sum())  if "current_equip_value" in snap_t.columns  else 0.0
-
-            armor_ct   = float(snap_ct["armor_value"].sum()) if "armor_value" in snap_ct.columns else 0.0
-            armor_t    = float(snap_t["armor_value"].sum())  if "armor_value" in snap_t.columns  else 0.0
-            helmets_ct = int(snap_ct["has_helmet"].sum())    if "has_helmet"  in snap_ct.columns else 0
-            helmets_t  = int(snap_t["has_helmet"].sum())     if "has_helmet"  in snap_t.columns  else 0
-
-            ct_spread = _team_spread(snap_ct)
-            t_spread  = _team_spread(snap_t)
-
-            has_defuser = bool(snap_ct["has_defuser"].any()) if "has_defuser" in snap_ct.columns else False
-
-            util_ct = _team_util(snap_ct)
-            util_t  = _team_util(snap_t)
-
-            active_smokes_xy   = _active_xy(r_smokes, tick)
-            active_infernos_xy = _active_xy(r_infernos, tick)
-
-            site_smoked  = _site_blocked(bomb_xy, active_smokes_xy)  if post_plant else False
-            site_on_fire = _site_blocked(bomb_xy, active_infernos_xy) if post_plant else False
-
-            min_dist_ct = _min_dist_to_xy(snap_ct, bomb_xy) if post_plant and bomb_xy else None
-            min_dist_t  = _min_dist_to_xy(snap_t,  bomb_xy) if post_plant and bomb_xy else None
-
-            info = _info_state(snap_ct, snap_t, vis_cache, tick)
-
-            ct_names = set(snap_ct["name"].tolist()) if "name" in snap_ct.columns else set()
-            t_names  = set(snap_t["name"].tolist())  if "name" in snap_t.columns  else set()
-            heard_ct = _team_heard_enemy(snap_ct, "t",  tick, footsteps_df, shots_df, reloads_df, enemy_names=t_names)
-            heard_t  = _team_heard_enemy(snap_t,  "ct", tick, footsteps_df, shots_df, reloads_df, enemy_names=ct_names)
-
-            states.append({
-                "match_id":            match_id,
-                "map":                 map_name,
-                "round_num":           rn,
-                "tick":                tick,
-                "time_into_round_s":   time_into_round_s,
-                "time_remaining_s":    time_remaining_s,
-                "post_plant":          int(post_plant),
-                "alive_ct":            alive_ct,
-                "alive_t":             alive_t,
-                "total_hp_ct":         round(hp_ct, 1),
-                "total_hp_t":          round(hp_t, 1),
-                "total_armor_ct":      round(armor_ct, 1),
-                "total_armor_t":       round(armor_t, 1),
-                "helmets_ct":          helmets_ct,
-                "helmets_t":           helmets_t,
-                "ct_spread":           None if ct_spread is None else round(ct_spread, 1),
-                "t_spread":            None if t_spread  is None else round(t_spread, 1),
-                "has_defuser":         int(has_defuser),
-                "equip_value_ct":      round(equip_ct),
-                "equip_value_t":       round(equip_t),
-                "smokes_ct":           util_ct["smokes"],
-                "smokes_t":            util_t["smokes"],
-                "flashes_ct":          util_ct["flashes"],
-                "flashes_t":           util_t["flashes"],
-                "he_ct":               util_ct["he"],
-                "he_t":                util_t["he"],
-                "molotovs_ct":         util_ct["molotovs"],
-                "molotovs_t":          util_t["molotovs"],
-                "active_smokes":       len(active_smokes_xy),
-                "active_infernos":     len(active_infernos_xy),
-                "active_smokes_xy":    active_smokes_xy,
-                "active_infernos_xy":  active_infernos_xy,
-                "site_smoked":         int(site_smoked),
-                "site_on_fire":        int(site_on_fire),
-                "min_dist_ct_to_bomb": min_dist_ct,
-                "min_dist_t_to_bomb":  min_dist_t,
-                "ct_spotted_count":    info["ct_spotted_count"],
-                "t_spotted_count":     info["t_spotted_count"],
-                "ct_heard_enemy":      heard_ct,
-                "t_heard_enemy":       heard_t,
-                "round_won_ct":        round_won_ct,
-            })
-
-        print(f"  [sampler] round {rn}: {len([s for s in states if s['round_num'] == rn])} samples", flush=True)
-
+    Now a thin loop over build_state. Behaviour is unchanged: same grid, same fields.
+    """
+    states: list[dict] = []
+    for ctx in iter_round_contexts(tables, match_id, map_name, vis_checker):
+        n = 0
+        for tick in range(int(ctx.r_start), int(ctx.r_end), SAMPLE_INTERVAL):
+            st = build_state(tick, ctx)
+            if st is not None:
+                states.append(st)
+                n += 1
+        print(f"  [sampler] round {ctx.round_num}: {n} samples", flush=True)
     return states
