@@ -78,6 +78,61 @@ def _enemy_of(side: str) -> str:
     return {"ct": "t", "t": "ct"}.get(side, "?")
 
 
+# ── Impact-attribution classification ─────────────────────────────────────────
+# How an action resolves determines how its win-probability contribution must be
+# measured. Taking a 2-tick delta around a smoke or a rotation yields ~0 and makes
+# 77% of the corpus meaningless, so the three classes are valued differently:
+#
+#   INSTANT   the jump across the action:  WP(t+1) - WP(t-1)
+#   DURATIVE  the RESIDUAL drift across the action's window — the window's total
+#             change minus the instantaneous jumps inside it
+#   ROUND     not an in-round action; valued once per team per round
+#
+# Consumed by score_impact's event-boundary evaluator (design step 3). Emitted into
+# the action JSON blob rather than new columns, so this stays schema-compatible.
+KIND_INSTANT  = "instantaneous"
+KIND_DURATIVE = "durative"
+KIND_ROUND    = "round"
+
+# Seconds, converted to ticks against the demo's real tick rate. These were
+# previously hardcoded tick counts that silently assumed 64 tick — on a 128-tick
+# FACEIT demo every one of them covered half the intended real time.
+SMOKE_POP_S    = 2.0    # throw -> deployed
+SMOKE_LIFE_S   = 18.0   # deployed -> faded
+MOLOTOV_LIFE_S = 7.0    # ignition -> burnt out
+FLASH_EFFECT_S = 0.5    # detonation is effectively instant; blindness is valued
+                        # through the kills it enables, which are scored separately
+
+
+def _ticks(seconds: float, tick_rate: int) -> int:
+    return int(round(seconds * tick_rate))
+
+
+def attribution_window(gtype: str, throw_tick, tick_rate: int,
+                       start_tick=None, end_tick=None) -> dict:
+    """Classification + window for one utility throw.
+
+    Prefers the parser's real start/end ticks when the smokes/infernos tables carry
+    them; falls back to nominal durations. Returns the fields merged into `action`.
+    """
+    if throw_tick is None or _nan(throw_tick):
+        return {"impact_kind": KIND_INSTANT, "resolve_tick": None}
+    t0 = int(throw_tick)
+
+    if gtype == "Smoke":
+        s = int(start_tick) if start_tick is not None and not _nan(start_tick) else t0 + _ticks(SMOKE_POP_S, tick_rate)
+        e = int(end_tick)   if end_tick   is not None and not _nan(end_tick)   else s  + _ticks(SMOKE_LIFE_S, tick_rate)
+        return {"impact_kind": KIND_DURATIVE, "window_start_tick": s, "window_end_tick": e}
+
+    if gtype in ("Molotov", "Incendiary"):
+        s = int(start_tick) if start_tick is not None and not _nan(start_tick) else t0
+        e = int(end_tick)   if end_tick   is not None and not _nan(end_tick)   else s + _ticks(MOLOTOV_LIFE_S, tick_rate)
+        return {"impact_kind": KIND_DURATIVE, "window_start_tick": s, "window_end_tick": e}
+
+    # HE, Flash, Decoy — the effect lands at detonation.
+    return {"impact_kind": KIND_INSTANT, "resolve_tick": t0}
+
+
 _DAMAGE_COLS = ["dmg_health", "dmg_health_real", "damage"]
 
 
@@ -327,7 +382,7 @@ def _get_enemy_names(ticks_df, enemy_side: str) -> set:
     return set(ticks_df[ticks_df["side"] == enemy_side]["name"].unique())
 
 
-def _smoke_impact(land_pos, throw_tick, r_ticks_df, r_kills, enemy_side) -> dict:
+def _smoke_impact(land_pos, throw_tick, r_ticks_df, r_kills, enemy_side, tick_rate: int = 64) -> dict:
     """
     Computes smoke impactfulness metrics.
     All metrics are from the perspective of the throwing team (enemy = opposing side).
@@ -339,18 +394,23 @@ def _smoke_impact(land_pos, throw_tick, r_ticks_df, r_kills, enemy_side) -> dict
 
     lx, ly     = float(land_pos[0]), float(land_pos[1])
     throw_tick = int(throw_tick)
-    POP_DELAY  = 128    # ~2s for smoke to pop
-    SMOKE_LIFE = 1152   # ~18s lifetime
+    # Durations in SECONDS against the demo's real tick rate. These were hardcoded
+    # tick counts assuming 64 tick; on a 128-tick FACEIT demo they covered half the
+    # intended real time, so "enemies at pop" was sampled 1 s after the throw rather
+    # than at the smoke actually deploying.
+    POP_DELAY  = _ticks(SMOKE_POP_S,  tick_rate)
+    SMOKE_LIFE = _ticks(SMOKE_LIFE_S, tick_rate)
+    HALF_SEC   = max(1, tick_rate // 2)
     NEAR_R     = 150    # "nearby" radius
     KILL_R     = 300    # "in area" radius for kills
-    APPROACH_W = 192    # 3s approach window before throw
+    APPROACH_W = _ticks(3.0, tick_rate)   # 3s approach window before throw
 
     pop_tick = throw_tick + POP_DELAY
     end_tick = pop_tick + SMOKE_LIFE
     mid_tick = pop_tick + SMOKE_LIFE // 2
 
     def _near_count(at_tick, radius):
-        sl = _tick_slice(r_ticks_df, at_tick - 32, at_tick + 32)
+        sl = _tick_slice(r_ticks_df, at_tick - HALF_SEC, at_tick + HALF_SEC)
         if sl.empty or "side" not in sl.columns or "X" not in sl.columns:
             return 0
         e = sl[sl["side"] == enemy_side]
@@ -391,8 +451,8 @@ def _smoke_impact(land_pos, throw_tick, r_ticks_df, r_kills, enemy_side) -> dict
             enemy_kills_in_area = int((dists <= KILL_R).sum())
 
     # Approach before throw and stop/reverse after pop
-    early_pos = _last_xy_by_name(_tick_slice(r_ticks_df, throw_tick - APPROACH_W, throw_tick - APPROACH_W + 32))
-    late_pos  = _last_xy_by_name(_tick_slice(r_ticks_df, throw_tick - 32, throw_tick))
+    early_pos = _last_xy_by_name(_tick_slice(r_ticks_df, throw_tick - APPROACH_W, throw_tick - APPROACH_W + HALF_SEC))
+    late_pos  = _last_xy_by_name(_tick_slice(r_ticks_df, throw_tick - HALF_SEC, throw_tick))
     after_pos = _last_xy_by_name(_tick_slice(r_ticks_df, pop_tick, pop_tick + 128))
 
     enemies_approaching        = 0
@@ -928,6 +988,10 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                 ev = _base(side)
                 ev.update({
                     "event_type":      "buy",
+                    # 0.0 is correct: a buy happens at freeze end, which is where the
+                    # round clock starts. It collides with the round's first state
+                    # sample, which is exactly why a buy must NOT be bracketed like an
+                    # in-round action — see impact_kind below.
                     "time_into_round": 0.0,
                     "situation": {
                         "cash":             round(cash),
@@ -943,6 +1007,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                         "equip_value": round(equip),
                         "cash_spent":  round(cash_spent),
                         "armor":       _safe(armor, 0),
+                        "impact_kind": KIND_ROUND,
                         "helmet":      helmet,
                         "defuser":     defuser,
                         "weapons":     weapons,
@@ -1044,6 +1109,8 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                         **rstate,
                     },
                     "action": {
+                        "impact_kind":     KIND_INSTANT,
+                        "resolve_tick":    int(tick) if tick is not None else None,
                         "role":            role,
                         "weapon":          weapon,
                         "headshot":        bool(row.get("headshot", False)),
@@ -1152,6 +1219,11 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                     "grenade_type":   gtype,
                     "throw_position": throw_pos,
                     "land_position":  land_pos,
+                    # A smoke's value accrues over its lifetime, not at the throw —
+                    # so it is scored on residual drift across this window.
+                    **attribution_window(gtype, tick, tick_rate,
+                                         start_tick=row.get("start_tick"),
+                                         end_tick=row.get("end_tick")),
                 },
                 "outcome": {
                     "kill_within_5s": kill_after,
@@ -1159,7 +1231,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                     # Impact blocks need a known thrower side to identify enemies.
                     # With side unresolved they would count this thrower's own team.
                     **(
-                        _smoke_impact(land_pos, tick, r_ticks_df, r_kills, _enemy_of(side))
+                        _smoke_impact(land_pos, tick, r_ticks_df, r_kills, _enemy_of(side), tick_rate)
                         if gtype == "Smoke" and side in ("ct", "t") else {}
                     ),
                     **(
@@ -1175,7 +1247,8 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
             events.append(ev)
 
         # ── Rotations (sampled every 1s, only if moved >200 units) ───────────
-        ROTATION_TICK_INTERVAL = 64
+        ROTATION_TICK_INTERVAL = tick_rate          # ~1 s
+        MOVE_SAMPLE_INTERVAL   = max(1, tick_rate // 2)   # ~0.5 s
         ROTATION_DIST_THRESHOLD = 200.0
 
         if not r_ticks_df.empty:
@@ -1221,7 +1294,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                                 window_samples = p_all[
                                     (p_all["tick"] >= prev_tick) &
                                     (p_all["tick"] <= tick) &
-                                    (p_all["tick"] % 32 == 0)
+                                    (p_all["tick"] % MOVE_SAMPLE_INTERVAL == 0)
                                 ].sort_values("tick")
 
                                 cur_seg_type  = None
@@ -1285,6 +1358,12 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                                     **rstate,
                                 },
                                 "action": {
+                                    # Movement has no instant: its value is whatever
+                                    # win probability accrued over the traversal and
+                                    # that no discrete event explains.
+                                    "impact_kind":       KIND_DURATIVE,
+                                    "window_start_tick": int(prev_tick) if prev_tick is not None else None,
+                                    "window_end_tick":   int(tick),
                                     "moved_to_area":     cur_area,
                                     "moved_to_position": cur_pos,
                                     "distance_moved":    round(dist, 1),
@@ -1335,6 +1414,8 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                 "time_into_round": secs(tick),
                 "situation":       _bomb_situation(tick, pname, pside, pos, yaw, snap),
                 "action": {
+                    "impact_kind":   KIND_INSTANT,
+                    "resolve_tick":  int(tick),
                     "bomb_action":   "plant",
                     "site":          site,
                     "position":      pos,
@@ -1366,6 +1447,8 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                 "time_into_round": secs(tick),
                 "situation":       _bomb_situation(tick, pname, pside, pos, yaw, snap),
                 "action": {
+                    "impact_kind":          KIND_INSTANT,
+                    "resolve_tick":         int(tick),
                     "bomb_action":          "defuse",
                     "site":                 site,
                     "position":             pos,
@@ -1400,7 +1483,8 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                     "alive_ct":        alive_ct,
                     "bomb_live_seconds": bomb_live_s,
                 },
-                "action":  {"bomb_action": "explode", "site": site},
+                "action":  {"impact_kind": KIND_INSTANT, "resolve_tick": int(tick),
+                            "bomb_action": "explode", "site": site},
                 "outcome": {"round_won": 1 if round_won == "t" else 0},
             })
             events.append(ev)
