@@ -11,15 +11,25 @@ dist/
 build/
 
 # CS2 demo files (huge, no reason to commit)
+# *.dem alone does NOT match .dem.zst / .dem.gz — the exact forms the downloader handles
 *.dem
+*.dem.zst
+*.dem.gz
+demos/
+data/_tmp_demos/
 
 # generated artefacts
-data/crosshair.db
-data/*.lgb
+# Ignore the data directory wholesale. Pattern-matching individual names kept missing
+# variants — data/backup.db, data/crosshair.db.old, sqlite sidecars — and each of
+# those is GBs of real player nicknames and Steam IDs headed for a public repo.
+data/
+*.lgb
 
 # secrets
-.env
-*.env
+# `.env` and `*.env` both require the name to END in .env, so .env.local and
+# .env.backup were committable. Prefix-match instead, then re-include the template.
+.env*
+!.env.example
 
 # macOS
 .DS_Store
@@ -28,5 +38,6 @@ data/*.lgb
 .vscode/
 .idea/
 
-# Claude Code
-.claude/
+# Claude Code — settings hold machine-specific paths, but skills are shared work
+.claude/*
+!.claude/skills/

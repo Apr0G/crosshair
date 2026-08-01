@@ -39,9 +39,23 @@ def _bearer() -> dict:
 # ── Match discovery (same criteria as the Playwright path) ────────────────────
 
 def get_match_demo_urls(match_id: str) -> list[str]:
-    """Demo resource URL(s) for a match via GET /matches/{id}. [] if none."""
+    """Demo resource URL(s) for a match via GET /matches/{id}. [] if none.
+
+    Raises on auth-class failures: returning [] for those would be identical to
+    "this match genuinely has no demo", so a revoked key would look like a clean run
+    over a player pool with nothing to download.
+    """
     try:
         data = scraper._api_get(f"/matches/{match_id}")
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        if status in (401, 403):
+            raise PermissionError(
+                f"FACEIT Data API returned {status} for /matches/{match_id} — "
+                f"the API key is invalid or lacks access. Stopping."
+            ) from e
+        print(f"    match details failed for {match_id}: {e}")
+        return []
     except Exception as e:
         print(f"    match details failed for {match_id}: {e}")
         return []
@@ -79,8 +93,10 @@ def iter_unprocessed_demos(
         for mid in match_ids:
             if not mid or mid in seen:
                 continue
-            # check both BO1 (mid) and BO3 (mid_m1) formats
-            if is_processed(mid) or is_processed(f"{mid}_m1"):
+            # Only short-circuit on the bare id. Treating <mid>_m1 as proof the whole
+            # series landed permanently abandons maps 2/3 of a BO where map 1 succeeded
+            # and a later map failed — the per-URL guard below handles those correctly.
+            if is_processed(mid):
                 print(f"    skipping {mid} (already in db)")
                 seen.add(mid)
                 continue
@@ -96,13 +112,27 @@ def iter_unprocessed_demos(
                 if is_processed(map_match_id):
                     print(f"    skipping {map_match_id} (already in db)")
                     continue
-                print(f"    found: {demo_url[:60]}...")
+                # Never truncate a URL by character count — whether the signature
+                # survives a [:60] depends on host/path length, which is luck.
+                print(f"    found: {scraper.redact_url(demo_url)}")
                 yield (map_match_id, demo_url)
 
             time.sleep(0.1)
 
 
 # ── Demo download (two-step: exchange → fetch + decompress) ───────────────────
+
+def _retry_after(resp, attempt: int, cap: float = 60.0) -> float:
+    """Honour Retry-After when the server sends it; exponential backoff otherwise.
+    Jitter is derived from the attempt so repeated runs don't re-synchronise."""
+    hdr = resp.headers.get("Retry-After")
+    if hdr:
+        try:
+            return min(float(hdr), cap)
+        except (TypeError, ValueError):
+            pass
+    return min(2 ** attempt + (attempt * 0.37) % 1.0, cap)
+
 
 def _signed_url(resource_url: str, max_retries: int = 4) -> str:
     """Exchange a private demo resource URL for a signed download URL."""
@@ -114,8 +144,8 @@ def _signed_url(resource_url: str, max_retries: int = 4) -> str:
             timeout=30,
         )
         if resp.status_code == 429:
-            wait = 2 ** attempt
-            print(f"    rate limited (429), backing off {wait}s ...")
+            wait = _retry_after(resp, attempt)
+            print(f"    rate limited (429), backing off {wait:.1f}s ...")
             time.sleep(wait)
             continue
         if resp.status_code == 403:
@@ -124,8 +154,24 @@ def _signed_url(resource_url: str, max_retries: int = 4) -> str:
                 "access. Grant Downloads to the key and retry."
             )
         resp.raise_for_status()
-        return resp.json()["payload"]["download_url"]
-    raise RuntimeError(f"Downloads API exchange failed after {max_retries} retries")
+        # Read defensively: a 200 with an unexpected body would otherwise raise a
+        # bare KeyError('payload') that says nothing about which endpoint misbehaved.
+        try:
+            body = resp.json()
+        except ValueError as e:
+            raise RuntimeError(
+                f"Downloads API returned non-JSON (status {resp.status_code})"
+            ) from e
+        url = (body or {}).get("payload", {}).get("download_url")
+        if not url:
+            raise RuntimeError(
+                f"Downloads API response missing payload.download_url "
+                f"(status {resp.status_code}, top-level keys: {sorted((body or {}).keys())})"
+            )
+        return url
+    raise RuntimeError(
+        f"Downloads API still rate-limited (429) after {max_retries} attempts"
+    )
 
 
 def download_demo(resource_url: str, dest: Path) -> Path:
