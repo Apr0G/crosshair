@@ -60,8 +60,14 @@ TARGET = "round_won_ct"
 def load_training_data() -> pd.DataFrame:
     conn = sqlite3.connect(DB_PATH)
     try:
+        # The sampler runs to `official_end`, which trails the round's decision by the
+        # post-round restart delay, so ~9.5% of rows are snapshots taken after the
+        # round was already won. Those are trivially separable (a side at 0 alive) and
+        # inflate AUC. Excluded from training; still present for score_impact, which
+        # needs them to give the round-deciding kill a p_after.
         df = pd.read_sql_query(
-            f"SELECT match_id, {', '.join(FEATURES)}, {TARGET} FROM round_states",
+            f"SELECT match_id, {', '.join(FEATURES)}, {TARGET} FROM round_states "
+            f"WHERE alive_ct > 0 AND alive_t > 0",
             conn,
         )
     finally:
@@ -115,14 +121,21 @@ def train(eval: bool = False):
         callbacks=[lgb.early_stopping(50, verbose=True), lgb.log_evaluation(100)],
     )
 
-    MODEL_PATH.parent.mkdir(exist_ok=True)
+    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     model.save_model(str(MODEL_PATH))
     print(f"\nmodel saved → {MODEL_PATH}")
+
+    # Refresh the process-wide cache so a train-then-predict in one process doesn't
+    # keep serving the pre-training booster.
+    global _model
+    _model = model
 
     if eval:
         preds = model.predict(X_val)
         print(f"\nauc:      {roc_auc_score(y_val, preds):.4f}")
         print(f"log-loss: {log_loss(y_val, preds):.4f}")
+        print("  (note: early stopping selected the iteration on this same val set,")
+        print("   so both numbers are mildly optimistic — not a clean held-out estimate)")
 
         imp = pd.Series(model.feature_importance(importance_type="gain"), index=FEATURES)
         print("\ntop features:")
@@ -148,20 +161,34 @@ def predict(state: dict) -> float:
 
 
 def predict_batch(states: list[dict]) -> np.ndarray:
-    rows = pd.concat([_state_to_row(s) for s in states], ignore_index=True)
-    return load_model().predict(rows)
+    if not states:
+        return np.array([])
+    return load_model().predict(_states_to_frame(states))
 
 
-def _state_to_row(state: dict) -> pd.DataFrame:
-    row = {f: state.get(f, np.nan) for f in FEATURES}
-    row["map"] = str(row.get("map") or "unknown")
-    df = pd.DataFrame([row])
-    df["map"] = df["map"].astype("category")
-    # None becomes object dtype in single-row DataFrames; cast numeric cols to float
+def _map_label(value) -> str:
+    """np.nan is truthy, so `value or "unknown"` would yield the string 'nan'."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "unknown"
+    return str(value)
+
+
+def _states_to_frame(states: list[dict]) -> pd.DataFrame:
+    """One frame for the whole batch. Concatenating per-state frames would give each
+    a single-label categorical; pandas degrades mixed categories to object dtype, and
+    LightGBM then rejects the frame with 'categorical_feature do not match'."""
+    df = pd.DataFrame([{f: s.get(f, np.nan) for f in FEATURES} for s in states],
+                      columns=FEATURES)
+    df["map"] = df["map"].map(_map_label).astype("category")
+    # None becomes object dtype; cast numeric cols to float
     for col in df.columns:
         if col != "map" and df[col].dtype == object:
             df[col] = df[col].astype(float)
     return df
+
+
+def _state_to_row(state: dict) -> pd.DataFrame:
+    return _states_to_frame([state])
 
 
 if __name__ == "__main__":

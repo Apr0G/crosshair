@@ -14,9 +14,26 @@ import pandas as pd
 
 SAMPLE_INTERVAL   = 64     # ticks between samples (~1 s at 64 tick)
 C4_TIMER          = 40.0   # seconds bomb burns after plant
+ROUND_TIME_S      = 115.0  # seconds of round clock after freeze time (CS2 competitive)
 SITE_BLOCK_RADIUS = 300.0  # units — smoke/molotov covers the bombsite within this
 HEARD_WINDOW      = 640    # ticks (~10 s) — how long sound is "remembered"
 HEARD_RANGE       = 1500.0 # units — max distance to hear footsteps/shots
+
+
+def _nan(v) -> bool:
+    try:
+        return v is None or (isinstance(v, float) and math.isnan(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def _first_valid(*vals):
+    """First value that is neither None nor NaN. `or` can't be used here — NaN is
+    truthy, so `official_end or end` never falls through, and 0 is legitimate."""
+    for v in vals:
+        if not _nan(v):
+            return v
+    return None
 
 
 _UTIL_KEYWORDS = {
@@ -50,16 +67,20 @@ def _team_util(snap) -> dict:
     return totals
 
 
-def _team_spread(snap) -> float:
-    """Mean pairwise distance between alive teammates — proxy for team cohesion."""
-    if snap.empty or "X" not in snap.columns or len(snap) < 2:
-        return 0.0
+def _team_spread(snap) -> float | None:
+    """Mean pairwise distance between alive teammates — proxy for team cohesion.
+
+    Returns None (not 0.0) when fewer than two players contribute: 0.0 means
+    "stacked tightly together", which is the opposite of a 1vX clutch.
+    """
+    if snap.empty or not {"X", "Y"}.issubset(snap.columns) or len(snap) < 2:
+        return None
     xs = snap["X"].to_numpy(dtype=float, na_value=np.nan)
     ys = snap["Y"].to_numpy(dtype=float, na_value=np.nan)
     mask = ~(np.isnan(xs) | np.isnan(ys))
     xs, ys = xs[mask], ys[mask]
     if len(xs) < 2:
-        return 0.0
+        return None
     dx = xs[:, None] - xs[None, :]
     dy = ys[:, None] - ys[None, :]
     d  = np.sqrt(dx * dx + dy * dy)
@@ -68,7 +89,7 @@ def _team_spread(snap) -> float:
 
 
 def _min_dist_to_xy(snap, xy) -> float | None:
-    if xy is None or snap.empty or "X" not in snap.columns:
+    if xy is None or snap.empty or not {"X", "Y"}.issubset(snap.columns):
         return None
     xs = snap["X"].to_numpy(dtype=float, na_value=np.nan)
     ys = snap["Y"].to_numpy(dtype=float, na_value=np.nan)
@@ -79,10 +100,10 @@ def _min_dist_to_xy(snap, xy) -> float | None:
 
 
 def _active_xy(df, tick, start_col="start_tick", end_col="end_tick") -> list[tuple]:
-    if df is None or df.empty:
+    if df is None or df.empty or not {start_col, end_col, "X", "Y"}.issubset(df.columns):
         return []
     active = df[(df[start_col] <= tick) & (df[end_col] >= tick)]
-    if active.empty or "X" not in active.columns:
+    if active.empty:
         return []
     return list(zip(active["X"].astype(float), active["Y"].astype(float)))
 
@@ -137,14 +158,18 @@ def _team_heard_enemy(snap_team, enemy_side, tick, footsteps_df, shots_df, reloa
     return heard
 
 
-def _info_state(snap_ct, snap_t, vis_cache, tick) -> dict:
+def _info_state(snap_ct, snap_t, vis_cache, tick, window_ticks: int = HEARD_WINDOW) -> dict:
+    empty = {"ct_spotted_count": 0, "t_spotted_count": 0}
     if not vis_cache:
-        return {"ct_spotted_count": 0, "t_spotted_count": 0}
+        return empty
 
-    cache_ticks = sorted(vis_cache.keys())
-    if not cache_ticks:
-        return {"ct_spotted_count": 0, "t_spotted_count": 0}
-    nearest = min(cache_ticks, key=lambda t: abs(t - tick))
+    # Only look BACKWARDS, and only within the window. _precompute_visibility skips
+    # ticks where nobody was spotted, so an unbounded nearest-match would reach
+    # forward to the round's first contact and tag every earlier state with it.
+    past = [k for k in vis_cache if tick - window_ticks <= k <= tick]
+    if not past:
+        return empty
+    nearest = max(past)
 
     tick_entry = vis_cache.get(nearest, {})
     ct_names = set(snap_ct["name"].tolist()) if "name" in snap_ct.columns else set()
@@ -184,7 +209,7 @@ def sample_round_states(
     if rounds_df.empty or ticks_df.empty:
         return []
 
-    tick_rate = 64
+    tick_rate = int(tables.get("tick_rate") or 64)
     states    = []
 
     # match bomb plants to rounds by tick range since bomb_planted has no round_num
@@ -193,18 +218,21 @@ def sample_round_states(
         for _, r in rounds_df.iterrows():
             rn       = int(r["round_num"])
             r_freeze = r.get("freeze_end")
-            r_offend = r.get("official_end") or r.get("end")
-            if r_freeze is None or r_offend is None:
+            r_offend = _first_valid(r.get("official_end"), r.get("end"))
+            if _nan(r_freeze) or _nan(r_offend):
                 continue
             in_round = bomb_planted_df[
                 (bomb_planted_df["tick"] >= float(r_freeze)) &
                 (bomb_planted_df["tick"] <= float(r_offend))
             ]
             if not in_round.empty:
-                row = in_round.iloc[0]
+                row = in_round.sort_values("tick").iloc[0]
                 bomb_info[rn] = {
                     "tick": int(row["tick"]),
-                    "xy":   (float(row["user_X"]), float(row["user_Y"])) if "user_X" in row and pd.notna(row["user_X"]) else None,
+                    "xy":   (float(row["user_X"]), float(row["user_Y"]))
+                            if {"user_X", "user_Y"}.issubset(row.index)
+                            and pd.notna(row["user_X"]) and pd.notna(row["user_Y"])
+                            else None,
                 }
 
     for _, r in rounds_df.iterrows():
@@ -213,16 +241,24 @@ def sample_round_states(
         except (ValueError, TypeError):
             continue
         r_freeze  = r.get("freeze_end")
-        r_offend  = r.get("official_end") or r.get("end")
-        round_won = r.get("winner", "?")
+        r_offend  = _first_valid(r.get("official_end"), r.get("end"))
+        round_won = str(_first_valid(r.get("winner")) or "").strip().lower()
 
-        if r_freeze is None or r_offend is None:
+        if _nan(r_freeze) or _nan(r_offend):
+            continue
+
+        # A round with no resolvable winner must be skipped, not labelled "T won" —
+        # `!= "ct"` would silently fabricate a label for every such round.
+        if round_won not in ("ct", "t"):
+            print(f"  [sampler] round {rn}: unknown winner {round_won!r}, skipping", flush=True)
             continue
 
         try:
             r_start = float(r_freeze)
             r_end   = float(r_offend)
         except (ValueError, TypeError):
+            continue
+        if math.isnan(r_start) or math.isnan(r_end):
             continue
         round_won_ct = 1 if round_won == "ct" else 0
 
@@ -246,10 +282,13 @@ def sample_round_states(
         vis_cache = _precompute_visibility(r_ticks, vis_checker, smokes_df=r_smokes)
 
         for tick in range(int(r_start), int(r_end), SAMPLE_INTERVAL):
-            snap = r_ticks[(r_ticks["tick"] >= tick - 32) & (r_ticks["tick"] <= tick + 32)]
-            if snap.empty:
+            snap = r_ticks[(r_ticks["tick"] >= tick - 32) & (r_ticks["tick"] < tick + 32)]
+            if snap.empty or "name" not in snap.columns:
                 continue
-            snap = snap.sort_values("tick").groupby("name").last().reset_index()
+            # drop_duplicates keeps a genuine single row per player. groupby().last()
+            # takes the last NON-NULL value per column independently, which can pair
+            # one tick's position with another tick's health.
+            snap = snap.sort_values("tick").drop_duplicates(subset="name", keep="last")
 
             alive   = snap[snap["is_alive"] == True] if "is_alive" in snap.columns else snap
             snap_ct = alive[alive["side"] == "ct"] if "side" in alive.columns else pd.DataFrame()
@@ -261,8 +300,15 @@ def sample_round_states(
                 continue
 
             post_plant        = plant_tick is not None and tick >= plant_tick
-            time_remaining_s  = round((r_end - tick) / tick_rate, 2)
             time_into_round_s = round((tick - r_start) / tick_rate, 2)
+
+            # Clock the state can actually know. Deriving this from r_end (the round's
+            # ACTUAL end tick) leaks the outcome: short rounds are decisive rounds, so
+            # the model learns "little time left => whoever leads now wins".
+            if post_plant:
+                time_remaining_s = round(max(0.0, C4_TIMER - (tick - plant_tick) / tick_rate), 2)
+            else:
+                time_remaining_s = round(max(0.0, ROUND_TIME_S - time_into_round_s), 2)
 
             hp_ct    = float(snap_ct["health"].sum()) if "health" in snap_ct.columns else 0.0
             hp_t     = float(snap_t["health"].sum())  if "health" in snap_t.columns  else 0.0
@@ -314,8 +360,8 @@ def sample_round_states(
                 "total_armor_t":       round(armor_t, 1),
                 "helmets_ct":          helmets_ct,
                 "helmets_t":           helmets_t,
-                "ct_spread":           round(ct_spread, 1),
-                "t_spread":            round(t_spread, 1),
+                "ct_spread":           None if ct_spread is None else round(ct_spread, 1),
+                "t_spread":            None if t_spread  is None else round(t_spread, 1),
                 "has_defuser":         int(has_defuser),
                 "equip_value_ct":      round(equip_ct),
                 "equip_value_t":       round(equip_t),
