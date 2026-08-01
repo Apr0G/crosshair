@@ -53,22 +53,33 @@ def extract(demo_path: str) -> dict[str, "pd.DataFrame"]:
     def to_pd(df: pl.DataFrame) -> "pd.DataFrame":
         return df.to_pandas()
 
-    tables: dict[str, "pd.DataFrame"] = {
-        "map_name": getattr(demo, "map_name", None) or getattr(demo, "header", {}).get("map_name", "unknown"),
-        "rounds":   to_pd(demo.rounds),
-        "ticks":    to_pd(demo.ticks),
-        "kills":    to_pd(demo.kills),
-        "damages":  to_pd(demo.damages),
-        "shots":    to_pd(demo.shots),
-        "grenades": to_pd(demo.grenades),
+    header = getattr(demo, "header", None) or {}
+    tick_rate = getattr(demo, "tickrate", None) or header.get("tickrate") or 64
+
+    tables: dict[str, object] = {
+        "map_name":  getattr(demo, "map_name", None) or header.get("map_name", "unknown"),
+        "tick_rate": int(tick_rate),
+        "rounds":    to_pd(demo.rounds),
+        "ticks":     to_pd(demo.ticks),
+        "kills":     to_pd(demo.kills),
+        "damages":   to_pd(demo.damages),
+        "shots":     to_pd(demo.shots),
+        "grenades":  to_pd(demo.grenades),
     }
+
+    if int(tick_rate) != 64:
+        print(f"  WARNING: demo tickrate is {tick_rate}, not 64. Time-based features "
+              f"assume 64 and will be wrong by a factor of {tick_rate / 64:.2f}.")
 
     for name, attr in [("smokes", "smokes"), ("infernos", "infernos"),
                        ("bomb", "bomb"), ("footsteps", "footsteps")]:
         try:
             tables[name] = to_pd(getattr(demo, attr))
-        except Exception:
-            pass
+        except AttributeError as e:
+            # A genuinely absent optional table. Anything else (a parser error, a
+            # renamed column) must NOT be swallowed — it silently degrades six-plus
+            # model features to constants while the run still prints "done".
+            print(f"  [warn] table '{name}' unavailable: {e}")
 
     for event_name, event_df in demo.events.items():
         tables[f"event_{event_name}"] = to_pd(event_df)
@@ -83,6 +94,10 @@ if __name__ == "__main__":
 
     tables = extract(sys.argv[1])
     for name, df in tables.items():
+        # map_name and tick_rate are scalars, not frames.
+        if not hasattr(df, "shape"):
+            print(f"{name}: {df}\n")
+            continue
         print(f"{name}: {df.shape[0]} rows x {df.shape[1]} cols")
         print(df.head(3))
         print()

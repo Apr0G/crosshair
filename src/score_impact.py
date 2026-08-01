@@ -15,9 +15,10 @@ Usage:
 """
 import argparse
 import sqlite3
+import sys
 import time
 from pathlib import Path
-from bisect import bisect_left, bisect_right
+from bisect import bisect_right
 
 import numpy as np
 import pandas as pd
@@ -42,11 +43,9 @@ def _impact_for_event(t_event: float, side: str, state_times: list[float], wp: n
 
     # p_before: latest state with time <= t_event
     i_before = bisect_right(state_times, t_event) - 1
-    # p_after:  earliest state with time >  t_event
-    i_after  = bisect_left(state_times, t_event)
-    # if the event lands exactly on a sample, take the next one as "after"
-    if i_after < len(state_times) and state_times[i_after] <= t_event:
-        i_after += 1
+    # p_after:  earliest state with time strictly >  t_event
+    # (bisect_right already skips every sample equal to t_event, including duplicates)
+    i_after  = bisect_right(state_times, t_event)
 
     p_before = float(wp[i_before]) if 0 <= i_before < len(wp) else None
     p_after  = float(wp[i_after])  if 0 <= i_after  < len(wp) else None
@@ -55,7 +54,14 @@ def _impact_for_event(t_event: float, side: str, state_times: list[float], wp: n
         return p_before, p_after, None
 
     delta = p_after - p_before
-    impact = delta if side == "ct" else -delta
+    # Anything that is not explicitly ct or t must not silently take the T branch —
+    # feature_extractor writes "?" whenever the parser's side column is missing.
+    if side == "ct":
+        impact = delta
+    elif side == "t":
+        impact = -delta
+    else:
+        return p_before, p_after, None
     return p_before, p_after, float(impact)
 
 
@@ -69,7 +75,10 @@ def score_match(con: sqlite3.Connection, match_id: str) -> int:
     if states.empty:
         return 0
 
-    states["map"] = states["map"].astype("category")
+    # wp_all is positional; group.index is label-based. They coincide only because
+    # read_sql_query hands back a RangeIndex — make that explicit so a future filter
+    # or sort here can't silently score events against the wrong states.
+    states = states.reset_index(drop=True)
     wp_all = _score_states(states)
 
     # Bucket states + WP by round
@@ -94,7 +103,11 @@ def score_match(con: sqlite3.Connection, match_id: str) -> int:
         rn   = int(row.round_num) if pd.notna(row.round_num) else None
         if rn is None or rn not in by_round:
             continue
-        t    = float(row.time_into_round) if pd.notna(row.time_into_round) else 0.0
+        # 0.0 is a real sample timestamp (the round's first state), so defaulting a
+        # missing time to it would confidently attribute the first second's swing.
+        if pd.isna(row.time_into_round):
+            continue
+        t    = float(row.time_into_round)
         side = (row.player_side or "").lower()
         state_times, wp = by_round[rn]
         p_b, p_a, imp = _impact_for_event(t, side, state_times, wp)
@@ -103,6 +116,12 @@ def score_match(con: sqlite3.Connection, match_id: str) -> int:
     if not updates:
         return 0
 
+    # Clear first: an event this pass skips (no states for its round, NULL time)
+    # would otherwise keep values from a previous model and silently mix scales.
+    con.execute(
+        "UPDATE events SET p_before=NULL, p_after=NULL, impact=NULL WHERE match_id=?",
+        (match_id,),
+    )
     con.executemany(
         "UPDATE events SET p_before=?, p_after=?, impact=? WHERE id=?",
         updates,
@@ -111,19 +130,30 @@ def score_match(con: sqlite3.Connection, match_id: str) -> int:
     return len(updates)
 
 
-def main():
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--match-id", help="Score only this match")
     ap.add_argument("--limit",    type=int, help="Score first N matches")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
-    con = sqlite3.connect(DB_PATH, timeout=30)
+    if not DB_PATH.exists():
+        print(f"No database at {DB_PATH}. Run `scrape` or `demo` first.")
+        return 1
+
+    # Fail before the loop rather than mid-match with a raw traceback.
+    try:
+        load_model()
+    except FileNotFoundError as e:
+        print(f"{e}\nTrain first:  .venv/bin/python src/main.py train --eval")
+        return 1
+
+    con = sqlite3.connect(f"file:{DB_PATH}?mode=rw", uri=True, timeout=30)
     try:
         if args.match_id:
             match_ids = [args.match_id]
         else:
             q = "SELECT match_id FROM processed_matches ORDER BY match_id"
-            if args.limit:
+            if args.limit is not None:   # `if args.limit:` made --limit 0 mean "all"
                 q += f" LIMIT {int(args.limit)}"
             match_ids = [r[0] for r in con.execute(q).fetchall()]
 
@@ -139,9 +169,10 @@ def main():
                 print(f"  [{i}/{len(match_ids)}] {mid[:36]} → {n:>5} events "
                       f"({total:,} total, {rate:.0f} ev/s, eta {eta:.0f}s)")
         print(f"\nDone. Updated {total:,} events in {time.time() - t0:.1f}s.")
+        return 0
     finally:
         con.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

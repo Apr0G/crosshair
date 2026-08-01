@@ -48,18 +48,53 @@ def _pos(row, prefix="") -> list[float]:
         return [None, None, None]
 
 
+# A failed distance must not read as "zero units away" — 0.0 passes every proximity
+# and audibility test maximally, fabricating a "close" cue out of a missing coordinate.
 def _dist3(a, b) -> float:
     try:
         return math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(3)))
     except Exception:
-        return 0.0
+        return float("inf")
 
 
 def _dist2(a, b) -> float:
     try:
         return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
     except Exception:
-        return 0.0
+        return float("inf")
+
+
+def _first_valid(*vals):
+    """First value that is neither None nor NaN. `or` can't be used on these — NaN is
+    truthy, so `official_end or end` never falls through, and 0 is legitimate."""
+    for v in vals:
+        if v is not None and not _nan(v):
+            return v
+    return None
+
+
+def _enemy_of(side: str) -> str:
+    """Opposing side, or "?" when the side is unknown — never guess "ct"."""
+    return {"ct": "t", "t": "ct"}.get(side, "?")
+
+
+_DAMAGE_COLS = ["dmg_health", "dmg_health_real", "damage"]
+
+
+def _damage_after(r_damages, tick, pname):
+    """Total damage `pname` dealt after `tick`. None if no damage column exists."""
+    if r_damages is None or r_damages.empty or tick is None:
+        return 0
+    if "attacker_name" not in r_damages.columns or "tick" not in r_damages.columns:
+        return 0
+    col = next((c for c in _DAMAGE_COLS if c in r_damages.columns), None)
+    if col is None:
+        return None
+    sel = r_damages[(r_damages["tick"] > tick) & (r_damages["attacker_name"] == pname)]
+    try:
+        return int(sel[col].sum())
+    except (TypeError, ValueError):
+        return None
 
 
 def _vel_mag(row) -> float:
@@ -150,7 +185,7 @@ def _player_row(snap, name: str):
 def _alive_counts_from_snap(snap, player_name, player_side):
     """Returns (alive_teammates, alive_enemies) relative to player."""
     if snap.empty:
-        return "?", "?"
+        return None, None
     try:
         alive_ct = int(snap[(snap["side"] == "ct") & (snap["is_alive"] == True)].shape[0])
         alive_t  = int(snap[(snap["side"] == "t")  & (snap["is_alive"] == True)].shape[0])
@@ -164,7 +199,7 @@ def _alive_counts_from_snap(snap, player_name, player_side):
             enemies   = alive_ct
         return max(0, teammates), enemies
     except Exception:
-        return "?", "?"
+        return None, None
 
 
 _SMOKE_RADIUS = 144.0
@@ -321,6 +356,10 @@ def _smoke_impact(land_pos, throw_tick, r_ticks_df, r_kills, enemy_side) -> dict
         e = sl[sl["side"] == enemy_side]
         if e.empty:
             return 0
+        # r_ticks_df is one row PER PLAYER PER TICK. Without collapsing to one row
+        # per player, a single enemy standing here for the 1 s window counts ~65×.
+        if "name" in e.columns:
+            e = e.sort_values("tick").drop_duplicates(subset="name", keep="last")
         xs = e["X"].to_numpy(dtype=float, na_value=0.0)
         ys = e["Y"].to_numpy(dtype=float, na_value=0.0)
         return int((np.sqrt((xs - lx) ** 2 + (ys - ly) ** 2) <= radius).sum())
@@ -422,8 +461,8 @@ def _grenade_damage(throw_tick, thrower, gtype, r_damages, thrower_side=None, na
         return {"damage_dealt": 0, "enemies_damaged": 0, "teammates_damaged": 0}
     dmg_col = next((c for c in ["dmg_health", "dmg_health_real", "damage"] if c in dmg.columns), None)
     damage_dealt = int(round(float(dmg[dmg_col].sum()))) if dmg_col else 0
-    if thrower_side and name_to_side and "victim_name" in dmg.columns:
-        enemy_side = "t" if thrower_side == "ct" else "ct"
+    if thrower_side in ("ct", "t") and name_to_side and "victim_name" in dmg.columns:
+        enemy_side = _enemy_of(thrower_side)
         victims = dmg["victim_name"].unique()
         enemies_damaged   = sum(1 for v in victims if name_to_side.get(v) == enemy_side)
         teammates_damaged = sum(1 for v in victims if name_to_side.get(v) == thrower_side)
@@ -737,7 +776,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
     if rounds_df.empty:
         return []
 
-    tick_rate = 64
+    tick_rate = int(tables.get("tick_rate") or 64)
     events: list[dict] = []
 
     for _, r in rounds_df.iterrows():
@@ -746,8 +785,10 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
         except (ValueError, TypeError):
             continue
         r_freeze  = r.get("freeze_end")
-        r_offend  = r.get("official_end") or r.get("end")
-        round_won = _safe(r.get("winner"), "?")
+        r_offend  = _first_valid(r.get("official_end"), r.get("end"))
+        # Normalise once. A casing change in the parser would otherwise silently make
+        # every round_won 0 rather than raising.
+        round_won = str(_safe(r.get("winner"), "?") or "?").strip().lower()
         bomb_ticks = bomb_planted_by_round.get(rn, set())
         round_history = _build_round_history(rounds_df, rn)
 
@@ -756,7 +797,10 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                 return 0.0
             return round((float(tick) - float(r_freeze)) / tick_rate, 2)
 
-        if r_freeze is None or r_offend is None:
+        if _nan(r_freeze) or r_freeze is None or _nan(r_offend) or r_offend is None:
+            continue
+        if round_won not in ("ct", "t"):
+            print(f"  [extractor] round {rn}: unknown winner {round_won!r}, skipping")
             continue
 
         r_kills   = kills_df[kills_df["round_num"] == rn] if not kills_df.empty else pd.DataFrame()
@@ -804,7 +848,10 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                 _pos_cols = [c for c in ["X", "Y", "Z"] if c in rg.columns]
                 rg_valid  = rg.dropna(subset=_pos_cols) if _pos_cols else rg
                 if rg_valid.empty:
-                    r_grens = pd.DataFrame()
+                    # Keep the columns — a bare pd.DataFrame() has none, and the
+                    # .sort_values("tick") below would raise KeyError and abort the
+                    # whole match after the expensive parse.
+                    r_grens = rg.iloc[0:0]
                 else:
                     rg_sorted     = rg_valid.sort_values("tick")
                     r_grens_first = rg_sorted.groupby("entity_id").first().reset_index()
@@ -817,7 +864,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
             else:
                 r_grens = rg
         else:
-            r_grens = pd.DataFrame()
+            r_grens = grenades_df.iloc[0:0]
 
         # Incendiary only: no Projectile type exists, use infernos table (CT side).
         # Molotov uses CMolotovProjectile from grenades_df (already included above).
@@ -885,8 +932,9 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                     "situation": {
                         "cash":             round(cash),
                         "own_equip_value":  round(equip),
-                        "team_equip_avg":   round(float(team_equip_avg)) if team_equip_avg else 0,
-                        "enemy_equip_avg":  round(float(enemy_equip_avg)) if enemy_equip_avg else 0,
+                        # `if x` doesn't catch NaN (NaN is truthy) and round(nan) raises.
+                        "team_equip_avg":   0 if _nan(team_equip_avg)  else round(float(team_equip_avg or 0)),
+                        "enemy_equip_avg":  0 if _nan(enemy_equip_avg) else round(float(enemy_equip_avg or 0)),
                         "round_history":    round_history,
                         "round_num":        rn,
                         "round_type":       _round_type(equip, side),
@@ -944,17 +992,20 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                         (r_kills["tick"] < tick) &
                         (r_kills["victim_side"] == side)
                     ]
-                    if not recent_deaths.empty:
+                    # Only the attacker can trade; for a victim the answer is N/A, and
+                    # returning False there would be indistinguishable from "not a trade".
+                    if role == "attacker" and not recent_deaths.empty:
+                        trade_kill = False
+                        killed = _safe(row.get("victim_name"), "")
+                        # Scan ALL nearby recent deaths — breaking on the first (which
+                        # is the OLDEST, since r_kills is tick-ordered) misses the trade
+                        # whenever two teammates died close together.
                         for _, td in recent_deaths.iterrows():
                             td_pos = _pos(td, "victim_")
                             if None not in pos and None not in td_pos and _dist3(pos, td_pos) <= 500:
-                                teammate_killer = _safe(td.get("attacker_name"), "")
-                                # Close to dead teammate: true only if killed the right person
-                                if role == "attacker" and _safe(row.get("victim_name"), "") == teammate_killer:
+                                if killed and killed == _safe(td.get("attacker_name"), ""):
                                     trade_kill = True
-                                else:
-                                    trade_kill = False
-                                break
+                                    break
 
                 e_name         = _safe(row.get("victim_name" if role == "attacker" else "attacker_name"), "?")
                 e_row          = _player_row(snap, e_name)
@@ -1019,9 +1070,10 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                         "kills_after":  int(r_kills[
                             (r_kills["tick"] > tick) & (r_kills["attacker_name"] == pname)
                         ].shape[0]) if not r_kills.empty and tick is not None and "attacker_name" in r_kills.columns else 0,
-                        "damage_after": int(r_damages[
-                            (r_damages["tick"] > tick) & (r_damages["attacker_name"] == pname)
-                        ]["damage"].sum()) if not r_damages.empty and tick is not None and "attacker_name" in r_damages.columns and "damage" in r_damages.columns else 0,
+                        # awpy's column is dmg_health, not damage — see the same
+                        # resolution in _grenade_damage. None (not 0) when absent, so
+                        # "no damage column" stays distinguishable from "did no damage".
+                        "damage_after": _damage_after(r_damages, tick, pname),
                         "died_after":   not r_kills[
                             (r_kills["tick"] > tick) & (r_kills["victim_name"] == pname)
                         ].empty if not r_kills.empty and tick is not None and "victim_name" in r_kills.columns else False,
@@ -1052,6 +1104,11 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                     closest_row = p_snap.iloc[closest_idx]
                     pos = _pos(closest_row)
                     yaw = float(closest_row.get("yaw", 0) or 0)
+            # Fall back to the per-round name→side map before giving up: an unresolved
+            # side would make every `"t" if side == "ct" else "ct"` below resolve to
+            # "ct", silently treating this thrower's own team as the enemy.
+            if side == "?" and thrower != "?":
+                side = name_to_side.get(thrower, "?")
             # Fallback: use grenade's own X/Y/Z (Projectile types have valid positions)
             if None in pos:
                 gren_pos = _pos(row)
@@ -1099,17 +1156,19 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                 "outcome": {
                     "kill_within_5s": kill_after,
                     "round_won":      1 if round_won == side else 0,
+                    # Impact blocks need a known thrower side to identify enemies.
+                    # With side unresolved they would count this thrower's own team.
                     **(
-                        _smoke_impact(land_pos, tick, r_ticks_df, r_kills, "t" if side == "ct" else "ct")
-                        if gtype == "Smoke" else {}
+                        _smoke_impact(land_pos, tick, r_ticks_df, r_kills, _enemy_of(side))
+                        if gtype == "Smoke" and side in ("ct", "t") else {}
                     ),
                     **(
-                        _flash_impact(tick, r_ticks_df, side, "t" if side == "ct" else "ct")
-                        if gtype == "Flash" else {}
+                        _flash_impact(tick, r_ticks_df, side, _enemy_of(side))
+                        if gtype == "Flash" and side in ("ct", "t") else {}
                     ),
                     **(
                         _grenade_damage(tick, thrower, gtype, r_damages, thrower_side=side, name_to_side=name_to_side)
-                        if gtype in ("HE", "Molotov", "Incendiary") else {}
+                        if gtype in ("HE", "Molotov", "Incendiary") and side in ("ct", "t") else {}
                     ),
                 },
             })
