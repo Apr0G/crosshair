@@ -219,8 +219,9 @@ def _tick_slice(df, t_start, t_end):
     return df.iloc[lo:hi]
 
 
-def _get_tick_snap(ticks_df, tick, window=64):
+def _get_tick_snap(ticks_df, tick, window=None, tick_rate: int = 64):
     import pandas as pd
+    window = tick_rate if window is None else window
     if ticks_df.empty or tick is None:
         return pd.DataFrame()
     snap = _tick_slice(ticks_df, int(tick), int(tick))
@@ -350,8 +351,10 @@ def _precompute_visibility(r_ticks_df, vis_checker, smokes_df=None, sample_inter
     return result
 
 
-def _lookup_spotted(vis_cache: dict, player_name: str, tick, window_ticks: int = 640) -> list[dict]:
-    """Fast lookup: finds all enemies spotted by player in past window_ticks from pre-computed cache."""
+def _lookup_spotted(vis_cache: dict, player_name: str, tick, window_ticks: int = None,
+                    tick_rate: int = 64) -> list[dict]:
+    """Enemies this player spotted within the last window_ticks (default ~10 s)."""
+    window_ticks = _ticks(10.0, tick_rate) if window_ticks is None else window_ticks
     if not vis_cache or tick is None:
         return []
     t = int(tick)
@@ -453,7 +456,7 @@ def _smoke_impact(land_pos, throw_tick, r_ticks_df, r_kills, enemy_side, tick_ra
     # Approach before throw and stop/reverse after pop
     early_pos = _last_xy_by_name(_tick_slice(r_ticks_df, throw_tick - APPROACH_W, throw_tick - APPROACH_W + HALF_SEC))
     late_pos  = _last_xy_by_name(_tick_slice(r_ticks_df, throw_tick - HALF_SEC, throw_tick))
-    after_pos = _last_xy_by_name(_tick_slice(r_ticks_df, pop_tick, pop_tick + 128))
+    after_pos = _last_xy_by_name(_tick_slice(r_ticks_df, pop_tick, pop_tick + _ticks(2.0, tick_rate)))
 
     enemies_approaching        = 0
     enemies_stopped_or_reversed = 0
@@ -480,10 +483,10 @@ def _smoke_impact(land_pos, throw_tick, r_ticks_df, r_kills, enemy_side, tick_ra
     }
 
 
-def _flash_impact(throw_tick, r_ticks_df, thrower_side, enemy_side) -> dict:
+def _flash_impact(throw_tick, r_ticks_df, thrower_side, enemy_side, tick_rate: int = 64) -> dict:
     """Counts enemies and teammates flashed, and avg enemy flash duration."""
     # 640 ticks (~10s): flash travels up to ~2s, effect lasts up to ~3.5s
-    window = _tick_slice(r_ticks_df, int(throw_tick), int(throw_tick) + 640)
+    window = _tick_slice(r_ticks_df, int(throw_tick), int(throw_tick) + _ticks(10.0, tick_rate))
     if window.empty or "flash_duration" not in window.columns:
         return {"enemies_flashed": 0, "teammates_flashed": 0, "avg_enemy_flash_duration": 0.0}
     flashed = window[window["flash_duration"] > 0]
@@ -499,16 +502,17 @@ def _flash_impact(throw_tick, r_ticks_df, thrower_side, enemy_side) -> dict:
     }
 
 
-def _grenade_damage(throw_tick, thrower, gtype, r_damages, thrower_side=None, name_to_side=None) -> dict:
+def _grenade_damage(throw_tick, thrower, gtype, r_damages, thrower_side=None, name_to_side=None,
+                    tick_rate: int = 64) -> dict:
     """Sums damage and unique players hit by HE or Molotov/Incendiary, split by team."""
     if r_damages is None or r_damages.empty or "weapon" not in r_damages.columns:
         return {"damage_dealt": 0, "enemies_damaged": 0, "teammates_damaged": 0}
     if gtype == "HE":
         weapons = ["hegrenade", "he_grenade", "he grenade"]
-        ticks   = 128
+        ticks   = _ticks(2.0, tick_rate)
     elif gtype in ("Molotov", "Incendiary"):
         weapons = ["inferno", "molotov", "incgrenade", "firebomb", "fire"]
-        ticks   = 640
+        ticks   = _ticks(MOLOTOV_LIFE_S, tick_rate)
     else:
         return {}
     dmg = r_damages[
@@ -576,7 +580,8 @@ def _heard_enemy(
     footsteps_df, shots_df, reloads_df, ticks_df,
     precomputed_landings: dict = None,
     precomputed_enemy_names: dict = None,
-    window_ticks: int = 640,
+    window_ticks: int = None,
+    tick_rate: int = 64,
 ) -> dict:
     """
     Checks all sound types (footsteps, gunshots, landings, reloads) from enemies.
@@ -590,6 +595,7 @@ def _heard_enemy(
 
     enemy_side   = "t" if player_side == "ct" else "ct"
     enemy_names  = (precomputed_enemy_names or {}).get(enemy_side) or _get_enemy_names(ticks_df, enemy_side)
+    window_ticks = _ticks(10.0, tick_rate) if window_ticks is None else window_ticks
     t_start      = tick - window_ticks
     heard_sounds = []
 
@@ -688,6 +694,7 @@ def _round_state(
     precomputed_enemy_names: dict = None,
     snap=None,
     vis_cache: dict = None,
+    tick_rate: int = 64,
 ):
     """
     Full round state context at a given tick.
@@ -708,14 +715,14 @@ def _round_state(
     time_remaining = None
     if r_offend is not None and tick is not None:
         try:
-            time_remaining = round((float(r_offend) - float(tick)) / 64, 1)
+            time_remaining = round((float(r_offend) - float(tick)) / tick_rate, 1)
         except Exception:
             pass
 
     # Has enemy info from damage (seen or taken damage in last 15s)
     has_damage_info = False
     if not damages_df.empty and tick is not None:
-        window_start = tick - 64 * 15
+        window_start = tick - _ticks(15.0, tick_rate)
         recent = damages_df[damages_df["tick"] >= window_start]
         if not recent.empty and "attacker_name" in recent.columns:
             has_damage_info = (
@@ -960,7 +967,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
             snap = r_ticks_df[r_ticks_df["tick"] == r_freeze]
             if snap.empty:
                 snap = r_ticks_df[
-                    (r_ticks_df["tick"] >= r_freeze) & (r_ticks_df["tick"] <= r_freeze + 64)
+                    (r_ticks_df["tick"] >= r_freeze) & (r_ticks_df["tick"] <= r_freeze + tick_rate)
                 ].sort_values("tick").groupby("name").first().reset_index()
 
             for _, row in snap.iterrows():
@@ -1053,7 +1060,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                 trade_kill = None
                 if not r_kills.empty and tick is not None and "victim_side" in r_kills.columns:
                     recent_deaths = r_kills[
-                        (r_kills["tick"] >= tick - 192) &
+                        (r_kills["tick"] >= tick - _ticks(3.0, tick_rate)) &
                         (r_kills["tick"] < tick) &
                         (r_kills["victim_side"] == side)
                     ]
@@ -1089,7 +1096,8 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                     r_ticks_df, r_damages, r_footsteps_df, r_shots_df, r_reloads_df,
                     bomb_ticks, r_freeze, r_offend,
                     precomputed_landings=precomputed_landings,
-                    precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache
+                    precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache,
+                    tick_rate=tick_rate,
                 )
 
                 ev = _base(side)
@@ -1186,7 +1194,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
             if not r_kills.empty and tick is not None:
                 window = r_kills[
                     (r_kills["tick"] >= tick) &
-                    (r_kills["tick"] <= tick + 64 * 5)
+                    (r_kills["tick"] <= tick + _ticks(5.0, tick_rate))
                 ]
                 kill_after = not window.empty
 
@@ -1203,8 +1211,9 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                 r_ticks_df, r_damages, r_footsteps_df, r_shots_df, r_reloads_df,
                 bomb_ticks, r_freeze, r_offend,
                 precomputed_landings=precomputed_landings,
-                precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache
-            )
+                precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache,
+                    tick_rate=tick_rate,
+                )
 
             ev = _base(side)
             ev.update({
@@ -1235,11 +1244,12 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                         if gtype == "Smoke" and side in ("ct", "t") else {}
                     ),
                     **(
-                        _flash_impact(tick, r_ticks_df, side, _enemy_of(side))
+                        _flash_impact(tick, r_ticks_df, side, _enemy_of(side), tick_rate)
                         if gtype == "Flash" and side in ("ct", "t") else {}
                     ),
                     **(
-                        _grenade_damage(tick, thrower, gtype, r_damages, thrower_side=side, name_to_side=name_to_side)
+                        _grenade_damage(tick, thrower, gtype, r_damages, thrower_side=side,
+                                        name_to_side=name_to_side, tick_rate=tick_rate)
                         if gtype in ("HE", "Molotov", "Incendiary") and side in ("ct", "t") else {}
                     ),
                 },
@@ -1343,8 +1353,9 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                                 r_ticks_df, r_damages, r_footsteps_df, r_shots_df, r_reloads_df,
                                 bomb_ticks, r_freeze, r_offend,
                                 precomputed_landings=precomputed_landings,
-                                precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache
-                            )
+                                precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache,
+                    tick_rate=tick_rate,
+                )
 
                             ev = _base(side)
                             ev.update({
@@ -1395,8 +1406,9 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                 r_ticks_df, r_damages, r_footsteps_df, r_shots_df, r_reloads_df,
                 bomb_ticks, r_freeze, r_offend,
                 precomputed_landings=precomputed_landings,
-                precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache
-            )
+                precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache,
+                    tick_rate=tick_rate,
+                )
             return {"time_into_round": secs(tick), **rstate}
 
         # Plant

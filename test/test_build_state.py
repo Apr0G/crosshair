@@ -69,7 +69,7 @@ def main() -> int:
     print("\n── reproduces the 1 Hz grid exactly ─────────────────────────────────────")
     rebuilt = []
     for c in ctxs:
-        for t in range(int(c.r_start), int(c.r_end), ss.SAMPLE_INTERVAL):
+        for t in range(int(c.r_start), int(c.r_end), c.sample_interval):
             st = ss.build_state(t, c)
             if st is not None:
                 rebuilt.append(st)
@@ -81,7 +81,7 @@ def main() -> int:
     got = [s for s in off if s is not None]
     check("off-grid ticks produce states", len(got) >= 4, f"{len(got)}/5")
     check("off-grid ticks are NOT all on the sample grid",
-          any((s["tick"] - int(ctx.r_start)) % ss.SAMPLE_INTERVAL != 0 for s in got))
+          any((s["tick"] - int(ctx.r_start)) % ctx.sample_interval != 0 for s in got))
 
     print("\n── adjacent ticks: the attribution use case ─────────────────────────────")
     # An action at tick T is valued as WP(T+1) - WP(T-1). Those must be buildable
@@ -126,6 +126,17 @@ def main() -> int:
         check("state at T is unchanged when future ticks are removed", same)
     else:
         check("state at T is unchanged when future ticks are removed", False, "no state at probe")
+
+    print("\n── every window scales to the demo's real tick rate ─────────────────────")
+    tr = ctx.tick_rate
+    for name, ticks, want_s in (("sample_interval", ctx.sample_interval, ss.SAMPLE_INTERVAL_S),
+                                ("snap_half",       ctx.snap_half,       ss.SNAP_HALF_S),
+                                ("heard_window",    ctx.heard_window,    ss.HEARD_WINDOW_S)):
+        got_s = ticks / tr
+        check(f"{name} is {want_s}s at {tr} tick", abs(got_s - want_s) < 0.01, f"{got_s:.2f}s")
+    grid_ticks = sorted({s["tick"] for s in grid if s["round_num"] == ctx.round_num})
+    gaps = {round((b - a) / tr, 3) for a, b in zip(grid_ticks, grid_ticks[1:])}
+    check("consecutive samples are 1s apart in REAL time", gaps <= {ss.SAMPLE_INTERVAL_S}, str(sorted(gaps)[:4]))
 
     print("\n── sentinels stay out of the data ───────────────────────────────────────")
     check("ct_spread is None (not 0.0) whenever fewer than 2 CT alive",

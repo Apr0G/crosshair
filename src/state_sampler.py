@@ -13,12 +13,19 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-SAMPLE_INTERVAL   = 64     # ticks between samples (~1 s at 64 tick)
-SNAP_HALF_WINDOW  = 32     # ticks either side of a sample tick to build a snapshot
+# Durations in SECONDS. Everything tick-valued is derived from the demo's real tick
+# rate at run time — a fixed tick count silently halves the real duration on a
+# 128-tick FACEIT demo, which is what these constants used to do.
+SAMPLE_INTERVAL_S = 1.0    # seconds between training samples
+SNAP_HALF_S       = 0.5    # seconds either side of a sample tick to build a snapshot
+HEARD_WINDOW_S    = 10.0   # how long a sound is "remembered"
+
+SAMPLE_INTERVAL   = 64     # legacy 64-tick defaults, kept for callers without a rate
+SNAP_HALF_WINDOW  = 32
 C4_TIMER          = 40.0   # seconds bomb burns after plant
 ROUND_TIME_S      = 115.0  # seconds of round clock after freeze time (CS2 competitive)
 SITE_BLOCK_RADIUS = 300.0  # units — smoke/molotov covers the bombsite within this
-HEARD_WINDOW      = 640    # ticks (~10 s) — how long sound is "remembered"
+HEARD_WINDOW      = 640    # legacy default; prefer ctx.heard_window
 HEARD_RANGE       = 1500.0 # units — max distance to hear footsteps/shots
 
 
@@ -118,11 +125,11 @@ def _site_blocked(bomb_xy, positions, radius=SITE_BLOCK_RADIUS) -> bool:
 
 
 def _team_heard_enemy(snap_team, enemy_side, tick, footsteps_df, shots_df, reloads_df,
-                      enemy_names: set | None = None) -> int:
+                      enemy_names: set | None = None, heard_window: int = HEARD_WINDOW) -> int:
     """Count how many players on snap_team heard an enemy in the last HEARD_WINDOW ticks."""
     if snap_team.empty or "X" not in snap_team.columns:
         return 0
-    t_start = tick - HEARD_WINDOW
+    t_start = tick - heard_window
     heard = 0
     sound_sources = []
     for df in [footsteps_df, shots_df, reloads_df]:
@@ -217,6 +224,8 @@ class RoundContext:
     round_won_ct: int
     tick_rate:    int = 64
     snap_half:    int = SNAP_HALF_WINDOW
+    sample_interval: int = SAMPLE_INTERVAL
+    heard_window:    int = HEARD_WINDOW
 
 
 def build_state(tick: int, ctx: RoundContext) -> dict | None:
@@ -287,12 +296,14 @@ def build_state(tick: int, ctx: RoundContext) -> dict | None:
     min_dist_ct = _min_dist_to_xy(snap_ct, bomb_xy) if post_plant and bomb_xy else None
     min_dist_t  = _min_dist_to_xy(snap_t,  bomb_xy) if post_plant and bomb_xy else None
 
-    info = _info_state(snap_ct, snap_t, ctx.vis_cache, tick, window_ticks=HEARD_WINDOW)
+    info = _info_state(snap_ct, snap_t, ctx.vis_cache, tick, window_ticks=ctx.heard_window)
 
     ct_names = set(snap_ct["name"].tolist()) if "name" in snap_ct.columns else set()
     t_names  = set(snap_t["name"].tolist())  if "name" in snap_t.columns  else set()
-    heard_ct = _team_heard_enemy(snap_ct, "t",  tick, ctx.footsteps_df, ctx.shots_df, ctx.reloads_df, enemy_names=t_names)
-    heard_t  = _team_heard_enemy(snap_t,  "ct", tick, ctx.footsteps_df, ctx.shots_df, ctx.reloads_df, enemy_names=ct_names)
+    heard_ct = _team_heard_enemy(snap_ct, "t",  tick, ctx.footsteps_df, ctx.shots_df, ctx.reloads_df,
+                                enemy_names=t_names, heard_window=ctx.heard_window)
+    heard_t  = _team_heard_enemy(snap_t,  "ct", tick, ctx.footsteps_df, ctx.shots_df, ctx.reloads_df,
+                                enemy_names=ct_names, heard_window=ctx.heard_window)
 
     return {
         "match_id":            ctx.match_id,
@@ -449,6 +460,9 @@ def iter_round_contexts(
             bomb_xy      = bomb_xy,
             round_won_ct = round_won_ct,
             tick_rate    = tick_rate,
+            snap_half       = max(1, int(round(SNAP_HALF_S       * tick_rate))),
+            sample_interval = max(1, int(round(SAMPLE_INTERVAL_S * tick_rate))),
+            heard_window    = max(1, int(round(HEARD_WINDOW_S    * tick_rate))),
         )
 
 
@@ -465,7 +479,7 @@ def sample_round_states(
     states: list[dict] = []
     for ctx in iter_round_contexts(tables, match_id, map_name, vis_checker):
         n = 0
-        for tick in range(int(ctx.r_start), int(ctx.r_end), SAMPLE_INTERVAL):
+        for tick in range(int(ctx.r_start), int(ctx.r_end), ctx.sample_interval):
             st = build_state(tick, ctx)
             if st is not None:
                 states.append(st)

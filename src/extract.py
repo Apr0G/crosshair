@@ -83,8 +83,9 @@ def extract(demo_path: str) -> dict[str, "pd.DataFrame"]:
     }
 
     if int(tick_rate) != 64:
-        print(f"  WARNING: demo tickrate is {tick_rate}, not 64. Time-based features "
-              f"assume 64 and will be wrong by a factor of {tick_rate / 64:.2f}.")
+        # Informational, not a warning: every tick-valued window downstream is
+        # derived from this number rather than assuming 64.
+        print(f"  tickrate: {tick_rate} (all time windows scale to it)")
 
     # demo.footsteps also reads the old `player_sound` key, so build it from the
     # renamed event directly rather than going through the property.
