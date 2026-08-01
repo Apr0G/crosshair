@@ -1,0 +1,22 @@
+# Metadata only. requirements.txt is the single source of truth for dependencies —
+# this file reads from it rather than keeping a second list, because the two had
+# already drifted (pyproject was missing lightgbm, scikit-learn and requests).
+#
+# There is deliberately no [project.scripts] entry: it used to declare
+# `crosshair = "crosshair.main:main"`, but src/ is a flat set of modules, not a
+# `crosshair` package, so the generated console script failed with ModuleNotFoundError.
+# Run the CLI as `.venv/bin/python src/main.py <subcommand>`.
+
+[project]
+name            = "crosshair"
+version         = "0.1.0"
+description     = "Impact-attribution engine for Counter-Strike 2 demos"
+requires-python = ">=3.11"
+dynamic         = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[build-system]
+requires      = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
