@@ -34,6 +34,8 @@ _DEMO_PATH_EXTS = (".dem", ".dem.zst", ".dem.gz")
 # Ceiling on a single demo. Real CS2 demos are well under this; zstd's ratio is
 # effectively unbounded, so a corrupt or hostile archive could otherwise fill the disk.
 MAX_DEMO_BYTES = 4 * 1024 ** 3   # 4 GiB
+# Below this a 'demo' is an error page or a stub, not a match.
+MIN_DEMO_BYTES = 1000
 
 
 def redact_url(url: str) -> str:
@@ -407,6 +409,7 @@ def download_demo(demo_url: str, dest: Path) -> Path:
     print(f"  Downloading {safe} ...")
 
     tmp = dest.with_name(dest.name + ".part")
+    ok  = False
     try:
         # Redact at the point of the request, not at the print site: the signed URL
         # must never escape this function inside an exception. requests puts the full
@@ -484,17 +487,23 @@ def download_demo(demo_url: str, dest: Path) -> Path:
                         raise IOError("decompressed demo exceeded the size cap")
                     out.write(block)
         else:
+            # Validate BEFORE publishing to dest: a rejected download must not leave
+            # a file where the caller expects a usable demo.
+            if tmp.stat().st_size < MIN_DEMO_BYTES:
+                raise IOError(f"demo is implausibly small ({tmp.stat().st_size} bytes)")
             tmp.replace(dest)
 
-        if dest.stat().st_size < 1000:
+        if dest.stat().st_size < MIN_DEMO_BYTES:
             raise IOError(f"demo is implausibly small ({dest.stat().st_size} bytes)")
 
+        ok = True
         print(f"  Saved to {dest}  ({dest.stat().st_size // 1_000_000} MB)")
         return dest
     finally:
         # Clean up on the failure path too — the old code only unlinked on success.
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
+        for leftover in ((tmp,) if ok else (tmp, dest)):
+            if leftover.exists():
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
