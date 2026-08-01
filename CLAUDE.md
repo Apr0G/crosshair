@@ -40,6 +40,9 @@ pipeline as working software, not a draft.
   This repo handles a FACEIT API key, browser session state, and `.env` — the review
   is mainly there to catch a secret or a session cookie leaking into a diff.
 - Only commit or push when I ask.
+- **Never add yourself as a contributor.** No `Co-Authored-By: Claude ...` trailer, no
+  "Generated with Claude Code", no assistant name/link in commit messages, PR bodies,
+  or `CONTRIBUTORS`/`AUTHORS`. Commits are authored by me alone.
 
 ---
 
@@ -136,6 +139,18 @@ A source module only has to expose `iter_unprocessed_demos(...)` and `download_d
   `win_probability.FEATURES` → retrain. Missing one of these fails silently or at insert.
 - Don't invent FACEIT API fields/endpoints — verify against a real response or the docs.
   If unsure, say so.
+- **FACEIT demos are 128-tick, not 64.** `extract.py` reads the real tickrate off the
+  demo and passes it through `tables["tick_rate"]`; `feature_extractor` and
+  `state_sampler` must use it, never a literal. The old hardcoded `64` made every
+  time value in the pre-2026-08-01 corpus wrong by exactly 2×.
+- **Always pass `events=EVENTS` to `awpy Demo.parse()`.** awpy 2.0.2's default list
+  asks for `player_sound`, which CS2 renamed to `player_footstep`, so the default
+  fails on every modern demo — and the failure mode depends on the demoparser2
+  version (KeyError on 0.41.2/.3, EntityNotFound on 0.40.x/0.41.0/.1, and on 0.41.4
+  a hard crash: an unsigned underflow that tries to allocate 2**64-1 bytes).
+  `demo.footsteps` reads the old key too, so build footsteps from
+  `demo.events["player_footstep"]` directly. Also: demoparser2's `parse_ticks(ticks=…)`
+  subset argument crashes on 0.41.4 — don't reach for it as an optimisation.
 - **Never use `0` or `"?"` as a sentinel for "unknown"** in a field where they are
   legitimate values. `ct_spread=0.0` meant both "1 player left" and "team stacked
   together"; `player_side="?"` silently took the T branch in impact scoring; a failed

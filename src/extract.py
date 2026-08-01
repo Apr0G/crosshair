@@ -15,6 +15,20 @@ from pathlib import Path
 import polars as pl
 from awpy.demo import Demo
 
+# awpy 2.0.2's default event list asks for `player_sound`, which CS2 renamed to
+# `player_footstep`. Leaving it to the default makes demo.parse() fail on every
+# modern demo — as a KeyError on demoparser2 0.41.2/0.41.3, an EntityNotFound on
+# 0.40.x/0.41.0/0.41.1, and a hard crash on 0.41.4 (an unsigned-integer underflow
+# in the Rust parser: it tries to allocate 2**64-1 bytes). Passing the list
+# explicitly, with the current name, sidesteps all of it.
+EVENTS = [
+    "bomb_defused", "bomb_dropped", "bomb_exploded", "bomb_pickup", "bomb_planted",
+    "flashbang_detonate", "hegrenade_detonate", "inferno_expire", "inferno_startburn",
+    "item_pickup", "player_death", "player_given_c4", "player_hurt", "player_footstep",
+    "player_spawn", "round_freeze_end", "round_officially_ended",
+    "smokegrenade_detonate", "smokegrenade_expired", "weapon_fire",
+]
+
 
 def extract(demo_path: str) -> dict[str, "pd.DataFrame"]:
     import pandas as pd
@@ -26,6 +40,7 @@ def extract(demo_path: str) -> dict[str, "pd.DataFrame"]:
     print(f"Parsing {path.name} ...")
     demo = Demo(path=path, verbose=False)
     demo.parse(
+        events=EVENTS,
         player_props=[
             "cash",
             "cash_spent_this_round",
@@ -71,8 +86,15 @@ def extract(demo_path: str) -> dict[str, "pd.DataFrame"]:
         print(f"  WARNING: demo tickrate is {tick_rate}, not 64. Time-based features "
               f"assume 64 and will be wrong by a factor of {tick_rate / 64:.2f}.")
 
+    # demo.footsteps also reads the old `player_sound` key, so build it from the
+    # renamed event directly rather than going through the property.
+    try:
+        tables["footsteps"] = to_pd(demo.events["player_footstep"])
+    except (KeyError, AttributeError) as e:
+        print(f"  [warn] table 'footsteps' unavailable: {e}")
+
     for name, attr in [("smokes", "smokes"), ("infernos", "infernos"),
-                       ("bomb", "bomb"), ("footsteps", "footsteps")]:
+                       ("bomb", "bomb")]:
         try:
             tables[name] = to_pd(getattr(demo, attr))
         except AttributeError as e:
