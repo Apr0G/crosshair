@@ -14,7 +14,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -44,12 +43,17 @@ def cmd_status(args):
     n_matches = con.execute("SELECT COUNT(*) FROM processed_matches").fetchone()[0]
     n_events  = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     n_states  = con.execute("SELECT COUNT(*) FROM round_states").fetchone()[0]
-    n_scored  = con.execute("SELECT COUNT(*) FROM events WHERE impact IS NOT NULL").fetchone()[0]
+    # `impact` is absent from a DB built by db._init_schema — degrade instead of
+    # dying with a raw OperationalError before printing anything.
+    try:
+        n_scored = con.execute("SELECT COUNT(*) FROM events WHERE impact IS NOT NULL").fetchone()[0]
+        scored_note = f"{n_scored:,} scored, {100 * n_scored // max(n_events, 1)}%"
+    except sqlite3.OperationalError:
+        scored_note = "impact column missing — schema needs migrating"
 
     print(f"DB        : {DB_PATH}  ({DB_PATH.stat().st_size / 1e9:.2f} GB)")
     print(f"Matches   : {n_matches:,}")
-    print(f"Events    : {n_events:,}  ({n_scored:,} scored, "
-          f"{100 * n_scored // max(n_events, 1)}%)")
+    print(f"Events    : {n_events:,}  ({scored_note})")
     print(f"States    : {n_states:,}")
 
     print("\nBy event type:")
@@ -67,11 +71,12 @@ def cmd_status(args):
     model = ROOT / "data" / "win_prob.lgb"
     print(f"\nWP model  : {'✓ present' if model.exists() else '✗ NOT TRAINED'}")
     con.close()
+    return 0
 
 
 def cmd_scrape(args):
     import pipeline
-    pipeline.run(
+    n_failed = pipeline.run(
         min_elo            = args.min_elo,
         region             = args.region,
         max_players        = args.max_players,
@@ -79,6 +84,7 @@ def cmd_scrape(args):
         start_offset       = args.start_offset,
         source             = args.source,
     )
+    return 1 if n_failed else 0
 
 
 def cmd_demo(args):
@@ -87,48 +93,54 @@ def cmd_demo(args):
     import feature_extractor
     import state_sampler
 
+    match_id = args.match_id or f"local_{Path(args.path).stem}"
+    db.init_db()
+    # Check BEFORE parsing — extract() is minutes of CPU, and the bare id alone
+    # misses the BO-series form the scrape path also checks.
+    if db.is_processed(match_id) or db.is_processed(f"{match_id}_m1"):
+        print(f"[{match_id}] already in DB, skipping.")
+        return 0
+
     print(f"=== processing {args.path} ===")
     tables = extractor.extract(args.path)
     map_name = tables.get("map_name", "unknown")
     vis_checker = feature_extractor.build_vis_checker(map_name)
 
-    match_id = args.match_id or f"local_{Path(args.path).stem}"
-    db.init_db()
-    if db.is_processed(match_id):
-        print(f"[{match_id}] already in DB, skipping.")
-        return
-
     events = feature_extractor.extract_events(tables, match_id=match_id, map_name=map_name, vis_checker=vis_checker)
     states = state_sampler.sample_round_states(tables, match_id=match_id, map_name=map_name, vis_checker=vis_checker)
 
-    db.insert_events(events)
-    db.insert_round_states(states)
-    db.mark_processed(match_id, map_name, args.path)
+    db.store_match(match_id, events, states, map_name, args.path)
     print(f"[{match_id}] stored {len(events):,} events, {len(states):,} states.")
+    return 0
 
 
 def cmd_train(args):
     import win_probability
     win_probability.train(eval=args.eval)
+    return 0
 
 
 def cmd_score(args):
     import score_impact
-    sys.argv = ["score_impact"]
-    if args.match_id: sys.argv += ["--match-id", args.match_id]
-    if args.limit:    sys.argv += ["--limit", str(args.limit)]
-    score_impact.main()
+    argv = []
+    if args.match_id:            argv += ["--match-id", args.match_id]
+    if args.limit is not None:   argv += ["--limit", str(args.limit)]
+    return score_impact.main(argv)
 
 
 def cmd_top(args):
     con = _conn()
     by  = args.by
-    where = "impact IS NOT NULL"
+    where  = ["impact IS NOT NULL"]
+    params: list = []
     if args.event_type:
-        where += f" AND event_type = '{args.event_type}'"
+        where.append("event_type = ?")
+        params.append(args.event_type)
     if args.side:
-        where += f" AND player_side = '{args.side}'"
+        where.append("player_side = ?")
+        params.append(args.side)
 
+    # `order` is chosen from a literal dict, never from user text.
     order = {
         "impact":     "ABS(impact) DESC",
         "positive":   "impact DESC",
@@ -142,69 +154,68 @@ def cmd_top(args):
     for r in con.execute(f"""
         SELECT id, match_id, round_num, time_into_round, player_side, event_type,
                p_before, p_after, impact
-        FROM events WHERE {where}
-        ORDER BY {order} LIMIT {args.n}
-    """):
-        print(f"  {r[0]:>9} {_short(r[1], 24):<24} {r[2]:>3} {r[3]:>6.1f} "
-              f"{r[4]:<4} {r[5]:<11} {r[6]:>6.3f} {r[7]:>6.3f} {r[8]:>+7.3f}")
+        FROM events WHERE {' AND '.join(where)}
+        ORDER BY {order} LIMIT ?
+    """, (*params, args.n)):
+        # round_num / time_into_round / player_side are all nullable.
+        rn = f"{r[2]:>3}" if r[2] is not None else "  -"
+        t  = f"{r[3]:>6.1f}" if r[3] is not None else "     -"
+        print(f"  {r[0]:>9} {_short(r[1], 24):<24} {rn} {t} "
+              f"{(r[4] or '-'):<4} {(r[5] or '-'):<11} {r[6]:>6.3f} {r[7]:>6.3f} {r[8]:>+7.3f}")
     con.close()
+    return 0
+
+
+def _like_literal(s: str) -> str:
+    """Escape LIKE metacharacters. Nicknames commonly contain _ and %, which would
+    otherwise act as wildcards and silently match a different player."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def cmd_player(args):
-    """Aggregate impact stats for one player across the DB."""
+    """List scored engagements that MENTION a player.
+
+    NOTE: the events schema has no actor column, so these rows cannot be narrowed to
+    the ones where `name` is the actor — a player also appears in another player's
+    `situation.enemies_spotted` and as a victim. The totals below are therefore over
+    every event mentioning the name, on both sides. Treat them as a search result,
+    not as a per-player statistic.
+    """
     con = _conn()
     name = args.name
+    pattern = f'%"{_like_literal(name)}"%'
 
-    print(f"Searching events involving '{name}' ...\n")
+    print(f"Events mentioning '{name}' (not filtered to actor — see --help):\n")
 
-    # Players appear in situation/action JSON; pull events where this name appears
-    # in either the actor's situation or as a victim.
-    rows = con.execute(f"""
+    rows = con.execute("""
         SELECT id, match_id, round_num, time_into_round, player_side, event_type,
                json_extract(action, '$.role') role,
                json_extract(outcome, '$.result') result,
                json_extract(action, '$.weapon') weapon,
-               impact, situation, action
+               impact
         FROM events
         WHERE event_type = 'engagement'
           AND impact IS NOT NULL
-          AND (situation LIKE '%"{name}"%' OR action LIKE '%"{name}"%')
-        LIMIT 5000
-    """).fetchall()
+          AND (situation LIKE ? ESCAPE '\\' OR action LIKE ? ESCAPE '\\')
+        ORDER BY ABS(impact) DESC
+        LIMIT ?
+    """, (pattern, pattern, args.n)).fetchall()
 
-    # Filter further: actor only (the player IS the actor of this event)
-    actor_rows = []
-    for r in rows:
-        sit = json.loads(r[10] or "{}")
-        # The actor's own name doesn't appear in situation directly — situation has
-        # enemies_spotted with names. We rely on action.attacker_place / victim_place
-        # to be ambiguous, so fall back to a heuristic: a row is "the actor's row"
-        # if it has the standard fields populated for an actor.
-        actor_rows.append(r)
+    if not rows:
+        print(f"No scored engagements mention '{name}'.")
+        con.close()
+        return 0
 
-    if not actor_rows:
-        print(f"No engagements found for '{name}'.")
-        return
-
-    total_imp = sum(r[9] for r in actor_rows)
-    n_kill    = sum(1 for r in actor_rows if r[7] == "kill" and r[6] == "attacker")
-    n_death   = sum(1 for r in actor_rows if r[7] == "death" and r[6] == "victim")
-    avg_imp   = total_imp / len(actor_rows)
-
-    print(f"  events found : {len(actor_rows):,}")
-    print(f"  total impact : {total_imp:+.2f}")
-    print(f"  avg impact   : {avg_imp:+.3f}")
-    print(f"  kills (as actor) : {n_kill}")
-    print(f"  deaths (as actor): {n_death}")
-
-    # Top moments
-    actor_rows.sort(key=lambda r: abs(r[9]), reverse=True)
+    print(f"  events shown : {len(rows):,}  (top {args.n} by |impact|)")
     print(f"\nTop {args.n} moments by |impact|:")
     print(f"  {'rn':>3} {'t':>6} {'side':<4} {'role':<8} {'result':<6} {'wpn':<10} {'imp':>7}")
-    for r in actor_rows[:args.n]:
-        print(f"  {r[2]:>3} {r[3]:>6.1f} {r[4]:<4} {(r[6] or '-'):<8} {(r[7] or '-'):<6} "
+    for r in rows:
+        rn = f"{r[2]:>3}" if r[2] is not None else "  -"
+        t  = f"{r[3]:>6.1f}" if r[3] is not None else "     -"
+        print(f"  {rn} {t} {(r[4] or '-'):<4} {(r[6] or '-'):<8} {(r[7] or '-'):<6} "
               f"{(r[8] or '-'):<10} {r[9]:>+7.3f}")
     con.close()
+    return 0
 
 
 def cmd_round(args):
@@ -223,7 +234,8 @@ def cmd_round(args):
 
     if not rows:
         print(f"No events for match {args.match_id} round {args.round}.")
-        return
+        con.close()
+        return 1
 
     # Get round winner
     winner = con.execute("""
@@ -240,9 +252,11 @@ def cmd_round(args):
             continue
         imp = f"{r[9]:+.3f}" if r[9] is not None else "  -  "
         wp  = f"{r[8]:.3f}" if r[8] is not None else "  -  "
-        print(f"  {r[1]:>6.1f} {r[2]:<4} {r[3]:<11} {(r[4] or '-'):<8} "
+        t   = f"{r[1]:>6.1f}" if r[1] is not None else "     -"
+        print(f"  {t} {(r[2] or '-'):<4} {(r[3] or '-'):<11} {(r[4] or '-'):<8} "
               f"{(r[5] or '-'):<6} {(r[6] or '-'):<10} {wp:>6} {imp:>7}")
     con.close()
+    return 0
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -299,8 +313,8 @@ def main():
     sp.set_defaults(fn=cmd_round)
 
     args = ap.parse_args()
-    args.fn(args)
+    return args.fn(args) or 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

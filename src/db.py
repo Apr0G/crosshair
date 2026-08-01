@@ -28,14 +28,64 @@ def _dumps(obj) -> str:
     return json.dumps(obj, cls=_Encoder)
 
 
+SCHEMA_VERSION = 1
+
+# Ordered, additive-only migrations applied to any DB whose user_version is behind.
+# CREATE TABLE IF NOT EXISTS can never add a column to an existing table, so new
+# columns MUST be added here as well as in _init_schema.
+_MIGRATIONS: list[tuple[int, list[str]]] = [
+    (1, [
+        "ALTER TABLE events ADD COLUMN p_before REAL",
+        "ALTER TABLE events ADD COLUMN p_after  REAL",
+        "ALTER TABLE events ADD COLUMN impact   REAL",
+        "ALTER TABLE round_states ADD COLUMN active_smokes_xy   TEXT",
+        "ALTER TABLE round_states ADD COLUMN active_infernos_xy TEXT",
+        "ALTER TABLE round_states ADD COLUMN site_smoked        INTEGER",
+        "ALTER TABLE round_states ADD COLUMN site_on_fire       INTEGER",
+    ]),
+]
+
+
 def _conn() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(exist_ok=True)
-    needs_init = not DB_PATH.exists()
-    c = sqlite3.connect(DB_PATH, timeout=10)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
-    if needs_init:
+    # WAL lets `score`/`train` read while a scrape writes. Without it a reader blocks
+    # the writer, whose insert then fails mid-match and leaves rows with no marker.
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=30000")
+    # Key off the tables, not the file: score_impact's sqlite3.connect creates an
+    # empty file, after which a file-existence check would skip init forever.
+    have_tables = c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='processed_matches'"
+    ).fetchone() is not None
+    if not have_tables:
         _init_schema(c)
+        c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        c.commit()
+    else:
+        _migrate(c)
     return c
+
+
+def _migrate(c: sqlite3.Connection):
+    """Apply any additive migrations this DB has not seen. Safe to run every open."""
+    version = c.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
+    for target, statements in _MIGRATIONS:
+        if target <= version:
+            continue
+        for stmt in statements:
+            try:
+                c.execute(stmt)
+            except sqlite3.OperationalError as e:
+                # Column already present (added out of band before this ran).
+                if "duplicate column" not in str(e).lower():
+                    raise
+        c.execute(f"PRAGMA user_version = {target}")
+        print(f"[db] migrated schema → v{target}")
+    c.commit()
 
 
 def _init_schema(c: sqlite3.Connection):
@@ -58,7 +108,10 @@ def _init_schema(c: sqlite3.Connection):
             situation       TEXT,
             action          TEXT,
             outcome         TEXT,
-            round_won       INTEGER
+            round_won       INTEGER,
+            p_before        REAL,
+            p_after         REAL,
+            impact          REAL
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_match ON events(match_id);
@@ -110,8 +163,10 @@ def _init_schema(c: sqlite3.Connection):
             round_won_ct         INTEGER
         );
 
-        CREATE INDEX IF NOT EXISTS idx_states_match ON round_states(match_id);
-        CREATE INDEX IF NOT EXISTS idx_states_won   ON round_states(round_won_ct);
+        -- Composite: score_impact filters by match_id and orders by
+        -- (round_num, time_into_round_s); a match_id-only index forces a temp b-tree.
+        CREATE INDEX IF NOT EXISTS idx_states_match_order
+            ON round_states(match_id, round_num, time_into_round_s);
     """)
 
 
@@ -146,10 +201,54 @@ def mark_processed(match_id: str, map_name: str = None, demo_url: str = None):
         c.close()
 
 
-def insert_events(events: list[dict], batch_size: int = 500):
-    if not events:
-        return
-    sql = """
+def store_match(match_id: str, events: list[dict], states: list[dict],
+                map_name: str = None, demo_url: str = None) -> None:
+    """Write one match's events, states and processed marker in ONE transaction.
+
+    The three used to be separate connections committing independently, and
+    insert_events committed every 500 rows — so any failure after the first batch
+    left committed rows with no processed_matches marker, and the next run
+    re-inserted the whole match. Nothing detected that: dedup is check-then-act and
+    events/round_states have no uniqueness constraint.
+    """
+    c = _conn()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        # Replace rather than append, so re-processing a match is idempotent even if
+        # a previous attempt died partway through.
+        c.execute("DELETE FROM events       WHERE match_id = ?", (match_id,))
+        c.execute("DELETE FROM round_states WHERE match_id = ?", (match_id,))
+        if events:
+            c.executemany(_EVENTS_SQL, [_event_params(e) for e in events])
+        if states:
+            c.executemany(_STATES_SQL, [_state_params(s) for s in states])
+        c.execute(
+            "INSERT OR REPLACE INTO processed_matches (match_id, map, demo_url) VALUES (?, ?, ?)",
+            (match_id, map_name, demo_url),
+        )
+        c.commit()
+        print(f"  stored {len(events)} events + {len(states)} states (one transaction)", flush=True)
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+def _event_params(e: dict) -> dict:
+    return {**e,
+            "situation": _dumps(e.get("situation", {})),
+            "action":    _dumps(e.get("action",    {})),
+            "outcome":   _dumps(e.get("outcome",   {}))}
+
+
+def _state_params(s: dict) -> dict:
+    return {**s,
+            "active_smokes_xy":   _dumps(s.get("active_smokes_xy",   [])),
+            "active_infernos_xy": _dumps(s.get("active_infernos_xy", []))}
+
+
+_EVENTS_SQL = """
         INSERT INTO events
             (match_id, map, round_num, player_side, event_type,
              time_into_round, situation, action, outcome, round_won)
@@ -157,27 +256,8 @@ def insert_events(events: list[dict], batch_size: int = 500):
             (:match_id, :map, :round_num, :player_side, :event_type,
              :time_into_round, :situation, :action, :outcome, :round_won)
     """
-    c = _conn()
-    try:
-        for i in range(0, len(events), batch_size):
-            batch = events[i:i + batch_size]
-            c.executemany(sql, [
-                {**e,
-                 "situation": _dumps(e.get("situation", {})),
-                 "action":    _dumps(e.get("action",    {})),
-                 "outcome":   _dumps(e.get("outcome",   {}))}
-                for e in batch
-            ])
-            c.commit()
-            print(f"  stored {min(i + batch_size, len(events))}/{len(events)} events", flush=True)
-    finally:
-        c.close()
 
-
-def insert_round_states(states: list[dict], batch_size: int = 500):
-    if not states:
-        return
-    sql = """
+_STATES_SQL = """
         INSERT INTO round_states
             (match_id, map, round_num, tick, time_into_round_s, time_remaining_s,
              post_plant, alive_ct, alive_t, total_hp_ct, total_hp_t,
@@ -199,16 +279,30 @@ def insert_round_states(states: list[dict], batch_size: int = 500):
              :site_smoked, :site_on_fire, :min_dist_ct_to_bomb, :min_dist_t_to_bomb,
              :ct_spotted_count, :t_spotted_count, :ct_heard_enemy, :t_heard_enemy, :round_won_ct)
     """
+
+
+# Kept for callers that write only one side (e.g. ad-hoc scripts). The pipeline uses
+# store_match, which is transactional — prefer that.
+def insert_events(events: list[dict], batch_size: int = 500):
+    if not events:
+        return
+    c = _conn()
+    try:
+        for i in range(0, len(events), batch_size):
+            c.executemany(_EVENTS_SQL, [_event_params(e) for e in events[i:i + batch_size]])
+            c.commit()
+            print(f"  stored {min(i + batch_size, len(events))}/{len(events)} events", flush=True)
+    finally:
+        c.close()
+
+
+def insert_round_states(states: list[dict], batch_size: int = 500):
+    if not states:
+        return
     c = _conn()
     try:
         for i in range(0, len(states), batch_size):
-            batch = [
-                {**s,
-                 "active_smokes_xy":   _dumps(s.get("active_smokes_xy",   [])),
-                 "active_infernos_xy": _dumps(s.get("active_infernos_xy", []))}
-                for s in states[i:i + batch_size]
-            ]
-            c.executemany(sql, batch)
+            c.executemany(_STATES_SQL, [_state_params(s) for s in states[i:i + batch_size]])
             c.commit()
             print(f"  stored {min(i + batch_size, len(states))}/{len(states)} round states", flush=True)
     finally:

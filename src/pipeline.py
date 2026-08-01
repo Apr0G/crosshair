@@ -10,9 +10,13 @@ End-to-end ingestion pipeline.
 Invoked by `main.py scrape` or run directly with `python src/pipeline.py`.
 """
 import argparse
+import re
+import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import db
 import scraper
@@ -21,10 +25,54 @@ import extract as extractor
 import feature_extractor
 import state_sampler
 
+# FACEIT match ids look like "1-<uuid>", optionally suffixed "_m1" for BO series.
+_MATCH_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def redact_url(url: str) -> str:
+    """Drop the query string. FACEIT signed URLs carry their credential there, and
+    `requests` puts the full URL into every HTTPError message."""
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(str(url))
+    except ValueError:
+        return "<unparseable url>"
+    clean = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    return f"{clean}?<redacted>" if parts.query else clean
+
+
+# urllib3 embeds only "path?query" in connection-level errors, not the full URL, so a
+# literal replace of the known URL never matches. Strip any query string that shows up.
+_QUERY_RE = re.compile(r"\?[^\s)'\"]+")
+
+
+def redact_text(text: str, *urls: str) -> str:
+    """Scrub credential-bearing URLs out of an arbitrary message.
+
+    Two passes, because exceptions carry the URL in more than one shape:
+      1. literal replacement of URLs we were handed
+      2. a blanket strip of any remaining `?...` query string
+    """
+    out = str(text)
+    for u in urls:
+        if u:
+            out = out.replace(str(u), redact_url(u))
+    return _QUERY_RE.sub("?<redacted>", out)
+
 
 def process_one(match_id: str, demo_url: str, source=scraper) -> int:
+    if not _MATCH_ID_RE.match(match_id or ""):
+        raise ValueError(f"refusing unsafe match_id: {match_id!r}")
+    if db.is_processed(match_id):
+        print(f"[{match_id}] already in DB, skipping.")
+        return 0
+
     with tempfile.TemporaryDirectory() as tmpdir:
         demo_path = Path(tmpdir) / f"{match_id}.dem"
+        # pathlib's `/` discards the left operand for an absolute right operand.
+        if not demo_path.resolve().is_relative_to(Path(tmpdir).resolve()):
+            raise ValueError(f"match_id escapes the temp dir: {match_id!r}")
 
         print(f"[{match_id}] downloading ...")
         source.download_demo(demo_url, demo_path)
@@ -42,9 +90,11 @@ def process_one(match_id: str, demo_url: str, source=scraper) -> int:
         states = state_sampler.sample_round_states(tables, match_id, map_name, vis_checker=vis_checker)
 
         print(f"[{match_id}] storing {len(events)} events + {len(states)} states ...")
-        db.insert_events(events)
-        db.insert_round_states(states)
-        db.mark_processed(match_id, map_name, demo_url)
+        # One transaction: events, states and the processed marker land together or
+        # not at all, so a crash can't leave rows behind that the next run re-inserts.
+        # Never persist a signed URL — the Playwright path yields one, and its
+        # credential lives in the query string.
+        db.store_match(match_id, events, states, map_name, redact_url(demo_url))
 
         print(f"[{match_id}] done.")
         return len(events)
@@ -58,6 +108,8 @@ def run(min_elo: int = 2500, region: str = "EU", max_players: int = 10, matches_
 
     total_events = 0
     i = 0
+    n_ok = 0
+    failed: list[tuple[str, str]] = []
     for match_id, demo_url in src.iter_unprocessed_demos(
         min_elo=min_elo,
         region=region,
@@ -70,23 +122,46 @@ def run(min_elo: int = 2500, region: str = "EU", max_players: int = 10, matches_
         try:
             n = process_one(match_id, demo_url, source=src)
             total_events += n
+            n_ok += 1
         except Exception as e:
-            print(f"[{match_id}] error: {e}")
+            # `e` can embed the signed URL (requests puts it in every HTTPError).
+            msg = redact_text(e, demo_url)
+            print(f"[{match_id}] error: {msg}")
+            failed.append((match_id, msg))
+
+    if hasattr(src, "close_browser"):
+        src.close_browser()
 
     if i == 0:
         print("no new demos found.")
 
     s = db.stats()
-    print(f"\ndone: {i} matches, +{total_events} events")
+    print(f"\ndone: {n_ok} ok, {len(failed)} failed, of {i} attempted (+{total_events} events)")
+    if failed:
+        print("failed matches:")
+        for mid, msg in failed:
+            print(f"  {mid}: {msg}")
     print(f"db: {s['matches_processed']} matches | {s['total_events']} events | {s['total_states']} states")
+    return len(failed)
 
 
-def loop(min_elo: int = 2500, region: str = "EU", interval: int = 3600, source: str = "playwright"):
+def loop(min_elo: int = 2500, region: str = "EU", interval: int = 3600,
+         source: str = "playwright", max_consecutive_failures: int = 5):
+    consecutive = 0
     while True:
         try:
             run(min_elo=min_elo, region=region, source=source)
-        except Exception as e:
-            print(f"run failed: {e}")
+            consecutive = 0
+        except Exception:
+            consecutive += 1
+            # str(e) throws away the traceback, and a bare KeyError prints as just
+            # 'nickname' — useless for diagnosing an unattended run.
+            # format_exc() can carry a signed URL from anywhere in the stack.
+            print(f"run failed ({consecutive}/{max_consecutive_failures}):\n"
+                  f"{redact_text(traceback.format_exc())}")
+            if consecutive >= max_consecutive_failures:
+                print("too many consecutive failures, exiting.")
+                return 1
         print(f"\nsleeping {interval}s ...")
         time.sleep(interval)
 
@@ -104,6 +179,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.loop:
-        loop(args.min_elo, args.region, args.interval, source=args.source)
+        sys.exit(loop(args.min_elo, args.region, args.interval, source=args.source) or 0)
     else:
-        run(args.min_elo, args.region, args.max_players, args.matches_per_player, args.start_offset, source=args.source)
+        n_failed = run(args.min_elo, args.region, args.max_players,
+                       args.matches_per_player, args.start_offset, source=args.source)
+        sys.exit(1 if n_failed else 0)
