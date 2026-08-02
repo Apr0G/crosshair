@@ -61,10 +61,19 @@ def _conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
-    # WAL lets `score`/`train` read while a scrape writes. Without it a reader blocks
-    # the writer, whose insert then fails mid-match and leaves rows with no marker.
-    c.execute("PRAGMA journal_mode=WAL")
+    # busy_timeout MUST be set before anything that takes a lock. journal_mode=WAL
+    # needs an exclusive lock, so with the timeout set afterwards it failed instantly
+    # the moment two ingest workers opened the DB at once ("database is locked").
     c.execute("PRAGMA busy_timeout=30000")
+    # WAL is persistent, so only pay for the exclusive lock when it isn't already on.
+    # It lets `score`/`train` read while a scrape writes; without it a reader blocks
+    # the writer, whose insert then fails mid-match and leaves rows with no marker.
+    try:
+        if (c.execute("PRAGMA journal_mode").fetchone()[0] or "").lower() != "wal":
+            c.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        # Another process is mid-switch; it will land in WAL either way.
+        pass
     # Key off the tables, not the file: score_impact's sqlite3.connect creates an
     # empty file, after which a file-existence check would skip init forever.
     have_tables = c.execute(

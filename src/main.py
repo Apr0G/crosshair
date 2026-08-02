@@ -24,6 +24,34 @@ DB_PATH = ROOT / "data" / "crosshair.db"
 sys.path.insert(0, str(Path(__file__).parent))
 
 
+def _load_dotenv() -> None:
+    """Read .env into the environment if it is not already there.
+
+    Nothing loaded .env before — os.getenv only ever sees the real environment — so
+    every invocation needed `set -a; source .env` first, and forgetting it produced
+    a bare "FACEIT_API_KEY not set" several calls deep. Stdlib only; a real shell
+    export always wins, so this cannot override what the operator set deliberately.
+    """
+    import os
+    env = ROOT / ".env"
+    if not env.exists():
+        return
+    try:
+        for line in env.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key, val = key.strip(), val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+    except OSError as e:
+        print(f"[warn] could not read {env}: {e}")
+
+
+_load_dotenv()
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _conn() -> sqlite3.Connection:
@@ -111,6 +139,11 @@ def _scrape_parallel(args) -> int:
 
     n = max(1, int(args.workers))
     per = max(1, args.max_players // n)
+
+    # Create and migrate the schema ONCE up front. Six workers racing to build a
+    # missing DB is the "database is locked" case, and it is entirely avoidable.
+    import db
+    db.init_db()
     procs = []
     print(f"launching {n} workers × {per} players each "
           f"(offsets {args.start_offset}..{args.start_offset + n * per - 1})\n")
