@@ -31,6 +31,10 @@ data/
 .env*
 !.env.example
 
+# run logs — contain player nicknames, match ids and demo URLs
+*.log
+scrape.log
+
 # macOS
 .DS_Store
 
