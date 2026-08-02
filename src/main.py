@@ -75,6 +75,8 @@ def cmd_status(args):
 
 
 def cmd_scrape(args):
+    if getattr(args, "workers", 1) > 1:
+        return _scrape_parallel(args)
     import pipeline
     n_failed = pipeline.run(
         min_elo            = args.min_elo,
@@ -85,6 +87,57 @@ def cmd_scrape(args):
         source             = args.source,
     )
     return 1 if n_failed else 0
+
+
+def _scrape_parallel(args) -> int:
+    """Run N ingest workers over DISJOINT slices of the player ranking.
+
+    Parsing is ~4 s but feature extraction is ~2 min per demo, almost all of it
+    visibility raycasting, and `run` does one match at a time in one process. That
+    makes a large corpus days of wall-clock for no good reason.
+
+    Splitting by player offset rather than by match keeps the workers from
+    rediscovering the same matches: each owns a contiguous band of the leaderboard.
+    Overlap is still possible where two players shared a match, and that is safe —
+    `store_match` is one transaction that replaces the match, so the worst case is
+    duplicated work, never duplicated rows.
+    """
+    import subprocess
+
+    if args.source == "playwright":
+        print("refusing to run Playwright workers in parallel: they would contend for "
+              "the same Chrome profile directory. Use --source api, or --workers 1.")
+        return 2
+
+    n = max(1, int(args.workers))
+    per = max(1, args.max_players // n)
+    procs = []
+    print(f"launching {n} workers × {per} players each "
+          f"(offsets {args.start_offset}..{args.start_offset + n * per - 1})\n")
+
+    for i in range(n):
+        cmd = [
+            sys.executable, str(Path(__file__)), "scrape",
+            "--source",             args.source,
+            "--min-elo",            str(args.min_elo),
+            "--region",             args.region,
+            "--max-players",        str(per),
+            "--matches-per-player", str(args.matches_per_player),
+            "--start-offset",       str(args.start_offset + i * per),
+        ]
+        log = ROOT / f"scrape-w{i}.log"
+        print(f"  worker {i}: offset {args.start_offset + i * per:>4}  → {log.name}")
+        procs.append((i, subprocess.Popen(cmd, stdout=log.open("w"), stderr=subprocess.STDOUT)))
+
+    print(f"\n  tail -f scrape-w*.log   to watch")
+    print(f"  .venv/bin/python src/main.py status   for totals\n")
+
+    failed = 0
+    for i, p in procs:
+        rc = p.wait()
+        print(f"  worker {i} exited {rc}")
+        failed += (rc != 0)
+    return 1 if failed else 0
 
 
 def cmd_demo(args):
@@ -282,6 +335,8 @@ def main():
     sp.add_argument("--start-offset",       type=int, default=0)
     sp.add_argument("--source",             choices=["playwright", "api"], default="playwright",
                     help="demo source: playwright (default) or api (FACEIT Downloads API)")
+    sp.add_argument("--workers",            type=int, default=1,
+                    help="parallel ingest workers over disjoint player offsets (api only)")
     sp.set_defaults(fn=cmd_scrape)
 
     sp = sub.add_parser("demo", help="Process one local .dem file")
