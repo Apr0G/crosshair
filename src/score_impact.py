@@ -32,6 +32,13 @@ def _score_states(states_df: pd.DataFrame) -> np.ndarray:
     """Run the WP model on a batch of round_states rows."""
     X = states_df[FEATURES].copy()
     X["map"] = X["map"].astype("category")
+    # A nullable feature that is NULL for EVERY row of a match comes back from
+    # sqlite as object dtype, and LightGBM rejects the frame outright. That is not
+    # hypothetical: a match with no bomb plant in any round has min_dist_*_to_bomb
+    # all-NULL. Coerce to float so NULL stays NaN, which LightGBM handles natively.
+    for col in X.columns:
+        if col != "map" and X[col].dtype == object:
+            X[col] = pd.to_numeric(X[col], errors="coerce")
     return load_model().predict(X)
 
 
