@@ -108,6 +108,10 @@ def cmd_demo(args):
 
     events = feature_extractor.extract_events(tables, match_id=match_id, map_name=map_name, vis_checker=vis_checker)
     states = state_sampler.sample_round_states(tables, match_id=match_id, map_name=map_name, vis_checker=vis_checker)
+    boundary = state_sampler.sample_boundary_states(tables, match_id, events, map_name, vis_checker=vis_checker)
+    if boundary:
+        print(f"[{match_id}] + {len(boundary)} boundary states")
+        states = states + boundary
 
     db.store_match(match_id, events, states, map_name, args.path)
     print(f"[{match_id}] stored {len(events):,} events, {len(states):,} states.")
@@ -125,6 +129,7 @@ def cmd_score(args):
     argv = []
     if args.match_id:            argv += ["--match-id", args.match_id]
     if args.limit is not None:   argv += ["--limit", str(args.limit)]
+    if getattr(args, "attribution", None): argv += ["--attribution", args.attribution]
     return score_impact.main(argv)
 
 
@@ -291,6 +296,8 @@ def main():
     sp = sub.add_parser("score", help="Compute p_before/p_after/impact for all events")
     sp.add_argument("--match-id", help="Score only one match")
     sp.add_argument("--limit",    type=int, help="Score first N matches")
+    sp.add_argument("--attribution", choices=["grid", "event"], default="grid",
+                    help="grid = legacy 1 Hz bracketing; event = per-action boundaries")
     sp.set_defaults(fn=cmd_score)
 
     sp = sub.add_parser("top", help="Top-impact moments in the DB")

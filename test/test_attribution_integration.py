@@ -181,6 +181,8 @@ def main() -> int:
     print(f"    max |residual|    {residuals.max():.3e}")
     print(f"    mean |residual|   {residuals.mean():.3e}")
     check("every round conserves to 1e-9", residuals.max() < 1e-9, f"max {residuals.max():.2e}")
+    check("conservation is a REAL check (drift accumulated, not derived)",
+          hasattr(__import__("attribution").RoundResult, "ct_attributed"))
     check("attributed a non-trivial number of rounds", n_rounds > 500, str(n_rounds))
 
     print("\n── how much of each round is explained ─────────────────────────────────")

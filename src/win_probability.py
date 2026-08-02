@@ -65,9 +65,13 @@ def load_training_data() -> pd.DataFrame:
         # round was already won. Those are trivially separable (a side at 0 alive) and
         # inflate AUC. Excluded from training; still present for score_impact, which
         # needs them to give the round-deciding kill a p_after.
+        # state_kind IS NULL means "grid" — rows written before boundary states
+        # existed. Boundary states cluster around kills, so training on them would
+        # over-sample exactly the moments the model is meant to predict.
         df = pd.read_sql_query(
             f"SELECT match_id, {', '.join(FEATURES)}, {TARGET} FROM round_states "
-            f"WHERE alive_ct > 0 AND alive_t > 0",
+            f"WHERE alive_ct > 0 AND alive_t > 0 "
+            f"AND (state_kind IS NULL OR state_kind = 'grid')",
             conn,
         )
     finally:

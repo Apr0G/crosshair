@@ -14,6 +14,7 @@ Usage:
     python src/score_impact.py --limit 50          # first N matches
 """
 import argparse
+import json
 import sqlite3
 import sys
 import time
@@ -23,6 +24,7 @@ from bisect import bisect_right
 import numpy as np
 import pandas as pd
 
+from attribution import Action, attribute_round, terminal_wp, KIND_DURATIVE
 from win_probability import FEATURES, load_model
 
 DB_PATH = Path(__file__).parent.parent / "data" / "crosshair.db"
@@ -70,6 +72,89 @@ def _impact_for_event(t_event: float, side: str, state_times: list[float], wp: n
     else:
         return p_before, p_after, None
     return p_before, p_after, float(impact)
+
+
+def _wp_path(states: pd.DataFrame):
+    """Win probability across a round's timeline.
+
+    Built from every stored state — the 1 Hz grid plus any boundary rows written at
+    action ticks. Interpolates between them, so a match ingested before boundary
+    states existed still scores, just at 1 s resolution.
+
+    Terminal states are pinned rather than predicted: training excludes decided rows,
+    so the model has never seen alive_ct == 0 and must not be asked about it.
+    """
+    ticks = states["tick"].to_numpy(dtype=float)
+    wp    = _score_states(states).astype(float)
+    for i, st in enumerate(states.to_dict("records")):
+        t = terminal_wp(st)
+        if t is not None:
+            wp[i] = t
+    lo, hi = ticks[0], ticks[-1]
+
+    def at(tick):
+        if tick is None or tick < lo or tick > hi:
+            return None
+        return float(np.interp(float(tick), ticks, wp))
+    return at, int(lo), int(hi)
+
+
+def _actions_for_round(events: pd.DataFrame) -> list:
+    out = []
+    for e in events.itertuples(index=False):
+        try:
+            act = json.loads(e.action or "{}")
+        except Exception:
+            continue
+        kind = act.get("impact_kind")
+        if not kind:
+            continue
+        window = None
+        if kind == KIND_DURATIVE:
+            ws, we = act.get("window_start_tick"), act.get("window_end_tick")
+            if ws is None or we is None:
+                continue
+            window = (int(ws), int(we))
+        out.append(Action(event_id=int(e.id), kind=kind,
+                          side=(e.player_side or "?").lower(),
+                          resolve_tick=act.get("resolve_tick"), window=window))
+    return out
+
+
+def score_match_event(con: sqlite3.Connection, match_id: str) -> tuple[int, float]:
+    """Event-boundary attribution. Returns (rows updated, worst conservation residual)."""
+    states = pd.read_sql_query(
+        "SELECT * FROM round_states WHERE match_id = ? ORDER BY round_num, tick",
+        con, params=(match_id,))
+    if states.empty:
+        return 0, 0.0
+    events = pd.read_sql_query(
+        "SELECT id, round_num, player_side, action FROM events WHERE match_id = ?",
+        con, params=(match_id,))
+    if events.empty:
+        return 0, 0.0
+
+    updates, worst = [], 0.0
+    for rn, grp in states.groupby("round_num", sort=False):
+        grp = grp.sort_values("tick").reset_index(drop=True)
+        if len(grp) < 3:
+            continue
+        wp_at, lo, hi = _wp_path(grp)
+        actions = _actions_for_round(events[events["round_num"] == rn])
+        if not actions:
+            continue
+        res = attribute_round(actions, wp_at, lo, hi)
+        worst = max(worst, abs(res.residual))
+        for a in res.attributions:
+            updates.append((a.p_before, a.p_after, a.impact, a.event_id))
+
+    if not updates:
+        return 0, worst
+    con.execute("UPDATE events SET p_before=NULL, p_after=NULL, impact=NULL WHERE match_id=?",
+                (match_id,))
+    con.executemany("UPDATE events SET p_before=?, p_after=?, impact=? WHERE id=?", updates)
+    con.commit()
+    return len(updates), worst
 
 
 def score_match(con: sqlite3.Connection, match_id: str) -> int:
@@ -141,6 +226,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--match-id", help="Score only this match")
     ap.add_argument("--limit",    type=int, help="Score first N matches")
+    ap.add_argument("--attribution", choices=["grid", "event"], default="grid",
+                    help="grid = legacy 1 Hz bracketing; event = per-action boundaries")
     args = ap.parse_args(argv)
 
     if not DB_PATH.exists():
@@ -164,11 +251,16 @@ def main(argv=None) -> int:
                 q += f" LIMIT {int(args.limit)}"
             match_ids = [r[0] for r in con.execute(q).fetchall()]
 
-        print(f"Scoring {len(match_ids)} match(es) ...")
+        print(f"Scoring {len(match_ids)} match(es) [attribution={args.attribution}] ...")
         t0 = time.time()
         total = 0
+        worst_residual = 0.0
         for i, mid in enumerate(match_ids, 1):
-            n = score_match(con, mid)
+            if args.attribution == "event":
+                n, resid = score_match_event(con, mid)
+                worst_residual = max(worst_residual, resid)
+            else:
+                n = score_match(con, mid)
             total += n
             if i % 10 == 0 or i == len(match_ids):
                 rate = total / max(time.time() - t0, 1e-9)
@@ -176,6 +268,9 @@ def main(argv=None) -> int:
                 print(f"  [{i}/{len(match_ids)}] {mid[:36]} → {n:>5} events "
                       f"({total:,} total, {rate:.0f} ev/s, eta {eta:.0f}s)")
         print(f"\nDone. Updated {total:,} events in {time.time() - t0:.1f}s.")
+        if args.attribution == "event":
+            print(f"attribution: event-boundary | worst conservation residual "
+                  f"{worst_residual:.2e} (must be ~0)")
         return 0
     finally:
         con.close()

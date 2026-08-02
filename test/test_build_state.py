@@ -73,8 +73,13 @@ def main() -> int:
             st = ss.build_state(t, c)
             if st is not None:
                 rebuilt.append(st)
+    # sample_round_states stamps state_kind on top; build_state leaves the kind to
+    # its caller, which is what lets the same function serve grid and boundary rows.
+    strip = lambda rows: [{k: v for k, v in r.items() if k != "state_kind"} for r in rows]
     check("build_state on the grid == sample_round_states",
-          rebuilt == grid, f"{len(rebuilt)} vs {len(grid)}")
+          strip(rebuilt) == strip(grid), f"{len(rebuilt)} vs {len(grid)}")
+    check("sample_round_states tags its rows as grid",
+          all(s.get("state_kind") == "grid" for s in grid))
 
     print("\n── works OFF the grid (what the sampler never did) ───────────────────────")
     off = [ss.build_state(int(ctx.r_start) + o, ctx) for o in (37, 91, 143, 205, 511)]

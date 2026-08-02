@@ -482,7 +482,66 @@ def sample_round_states(
         for tick in range(int(ctx.r_start), int(ctx.r_end), ctx.sample_interval):
             st = build_state(tick, ctx)
             if st is not None:
+                st["state_kind"] = "grid"
                 states.append(st)
                 n += 1
         print(f"  [sampler] round {ctx.round_num}: {n} samples", flush=True)
     return states
+
+
+def sample_boundary_states(
+    tables: dict,
+    match_id: str,
+    events: list[dict],
+    map_name: str = "unknown",
+    vis_checker=None,
+) -> list[dict]:
+    """States immediately before and after each instantaneous action.
+
+    Impact attribution values an action as WP(t+1) - WP(t-1). On the 1 Hz grid alone
+    those two ticks land on the same sample for 25% of actions, so the action's own
+    jump is invisible and gets smeared across the whole second. These rows make the
+    boundaries addressable.
+
+    Tagged `boundary` so training can exclude them — they cluster around kills, and
+    training on them would over-sample exactly the moments being predicted.
+    """
+    import json as _json
+
+    # resolve ticks wanted per round, from the classification feature_extractor emits
+    wanted: dict[int, set] = {}
+    for e in events:
+        if e.get("match_id") != match_id:
+            continue
+        act = e.get("action")
+        if isinstance(act, str):
+            try:
+                act = _json.loads(act)
+            except Exception:
+                continue
+        if not isinstance(act, dict) or act.get("impact_kind") != "instantaneous":
+            continue
+        rt, rn = act.get("resolve_tick"), e.get("round_num")
+        if rt is None or rn is None:
+            continue
+        wanted.setdefault(int(rn), set()).update((int(rt) - 1, int(rt) + 1))
+
+    if not wanted:
+        return []
+
+    out: list[dict] = []
+    for ctx in iter_round_contexts(tables, match_id, map_name, vis_checker):
+        ticks = wanted.get(ctx.round_num)
+        if not ticks:
+            continue
+        # Skip anything already on the grid — those rows exist and duplicating them
+        # would double-weight that tick.
+        grid = set(range(int(ctx.r_start), int(ctx.r_end), ctx.sample_interval))
+        for tick in sorted(t for t in ticks if t not in grid):
+            if not (ctx.r_start <= tick <= ctx.r_end):
+                continue
+            st = build_state(tick, ctx)
+            if st is not None:
+                st["state_kind"] = "boundary"
+                out.append(st)
+    return out

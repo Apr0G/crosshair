@@ -28,7 +28,7 @@ def _dumps(obj) -> str:
     return json.dumps(obj, cls=_Encoder)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Ordered, additive-only migrations applied to any DB whose user_version is behind.
 # CREATE TABLE IF NOT EXISTS can never add a column to an existing table, so new
@@ -43,7 +43,18 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
         "ALTER TABLE round_states ADD COLUMN site_smoked        INTEGER",
         "ALTER TABLE round_states ADD COLUMN site_on_fire       INTEGER",
     ]),
+    (2, [
+        # Impact attribution needs the state immediately before and after an action.
+        # Those extra rows live in round_states alongside the 1 Hz grid, so they must
+        # be distinguishable — training uses the grid only, or it over-samples around
+        # kills. NULL means "grid": every pre-existing row predates boundary states.
+        "ALTER TABLE round_states ADD COLUMN state_kind TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_states_kind ON round_states(state_kind)",
+    ]),
 ]
+
+STATE_GRID     = "grid"       # the ~1 Hz training sample
+STATE_BOUNDARY = "boundary"   # tick±1 around an instantaneous action
 
 
 def _conn() -> sqlite3.Connection:
@@ -160,7 +171,8 @@ def _init_schema(c: sqlite3.Connection):
             t_spotted_count      INTEGER,
             ct_heard_enemy       INTEGER,
             t_heard_enemy        INTEGER,
-            round_won_ct         INTEGER
+            round_won_ct         INTEGER,
+            state_kind           TEXT
         );
 
         -- Composite: score_impact filters by match_id and orders by
@@ -244,6 +256,7 @@ def _event_params(e: dict) -> dict:
 
 def _state_params(s: dict) -> dict:
     return {**s,
+            "state_kind":         s.get("state_kind", STATE_GRID),
             "active_smokes_xy":   _dumps(s.get("active_smokes_xy",   [])),
             "active_infernos_xy": _dumps(s.get("active_infernos_xy", []))}
 
@@ -267,7 +280,8 @@ _STATES_SQL = """
              he_ct, he_t, molotovs_ct, molotovs_t, active_smokes, active_infernos,
              active_smokes_xy, active_infernos_xy,
              site_smoked, site_on_fire, min_dist_ct_to_bomb, min_dist_t_to_bomb,
-             ct_spotted_count, t_spotted_count, ct_heard_enemy, t_heard_enemy, round_won_ct)
+             ct_spotted_count, t_spotted_count, ct_heard_enemy, t_heard_enemy, round_won_ct,
+             state_kind)
         VALUES
             (:match_id, :map, :round_num, :tick, :time_into_round_s, :time_remaining_s,
              :post_plant, :alive_ct, :alive_t, :total_hp_ct, :total_hp_t,
@@ -277,7 +291,8 @@ _STATES_SQL = """
              :he_ct, :he_t, :molotovs_ct, :molotovs_t, :active_smokes, :active_infernos,
              :active_smokes_xy, :active_infernos_xy,
              :site_smoked, :site_on_fire, :min_dist_ct_to_bomb, :min_dist_t_to_bomb,
-             :ct_spotted_count, :t_spotted_count, :ct_heard_enemy, :t_heard_enemy, :round_won_ct)
+             :ct_spotted_count, :t_spotted_count, :ct_heard_enemy, :t_heard_enemy, :round_won_ct,
+             :state_kind)
     """
 
 

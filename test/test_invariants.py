@@ -123,9 +123,12 @@ def main() -> int:
     # The sampler builds its dict literal inline; check the keys it emits.
     emitted = set(re.findall(r'"([a-z0-9_]+)":\s', ss_src.split("states.append({")[-1]))
     if emitted:
+        # `map` comes from the caller's argument and `state_kind` is stamped by the
+        # sampler after build_state returns — neither is in the dict literal.
+        caller_set = {"map", "state_kind"}
         check("every inserted round_states column is emitted by the sampler",
-              (ins_states - {"map"}) <= (emitted | {"map"}),
-              f"never emitted: {sorted(ins_states - emitted - {'map'})}")
+              (ins_states - caller_set) <= (emitted | caller_set),
+              f"never emitted: {sorted(ins_states - emitted - caller_set)}")
     else:
         skip("sampler emits every inserted column", "could not locate the state dict")
 

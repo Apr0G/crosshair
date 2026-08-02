@@ -88,6 +88,13 @@ def process_one(match_id: str, demo_url: str, source=scraper) -> int:
 
         print(f"[{match_id}] sampling round states ...")
         states = state_sampler.sample_round_states(tables, match_id, map_name, vis_checker=vis_checker)
+        # Extra states at each instantaneous action's boundaries, so impact
+        # attribution can value the action's own jump rather than the whole second.
+        boundary = state_sampler.sample_boundary_states(
+            tables, match_id, events, map_name, vis_checker=vis_checker)
+        if boundary:
+            print(f"[{match_id}] + {len(boundary)} boundary states")
+            states = states + boundary
 
         print(f"[{match_id}] storing {len(events)} events + {len(states)} states ...")
         # One transaction: events, states and the processed marker land together or
