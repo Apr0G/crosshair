@@ -122,7 +122,9 @@ def main() -> int:
     if full is not None:
         import copy
         trunc = copy.copy(ctx)
-        trunc.r_ticks = ctx.r_ticks[ctx.r_ticks["tick"] <= probe + ctx.snap_half]
+        # truncate at PROBE, not probe+snap_half: the state at t must not depend
+        # on a single tick after t. The looser bound let the bug pass.
+        trunc.r_ticks = ctx.r_ticks[ctx.r_ticks["tick"] <= probe]
         trunc.vis_cache = {k: v for k, v in ctx.vis_cache.items() if k <= probe}
         cut = ss.build_state(probe, trunc)
         same = cut is not None and all(

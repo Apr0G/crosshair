@@ -236,8 +236,13 @@ def build_state(tick: int, ctx: RoundContext) -> dict | None:
     anything cached across calls.
     """
     tick = int(tick)
-    snap = ctx.r_ticks[(ctx.r_ticks["tick"] >= tick - ctx.snap_half) &
-                       (ctx.r_ticks["tick"] <  tick + ctx.snap_half)]
+    # BACKWARD-looking window. A symmetric one reads up to tick+snap_half, so
+    # build_state(t-1) saw ticks after t — meaning the state "before" a kill already
+    # had the victim dead, the state after was identical, and the action's own jump
+    # was exactly zero. That is what made 95% of instantaneous impacts vanish even
+    # with boundary states present. A state at time t must never contain t's future.
+    snap = ctx.r_ticks[(ctx.r_ticks["tick"] >  tick - ctx.snap_half) &
+                       (ctx.r_ticks["tick"] <= tick)]
     if snap.empty or "name" not in snap.columns:
         return None
     # drop_duplicates keeps a genuine single row per player. groupby().last()
