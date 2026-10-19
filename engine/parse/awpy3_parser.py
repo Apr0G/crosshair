@@ -123,9 +123,9 @@ _EXPLODE_REASONS = ("target_bombed", "bomb_exploded")
 
 EXPECTED_TICK_RATE = 128
 TICK_RATE_TOL      = 0.5           # ticks/s; playback_ticks / playback_time is not exact
-MIN_ROUNDS         = 16
+MIN_ROUNDS         = 13            # a completed MR12 map: 13-0 .. 13-2 are legitimate (decided 2026-10-19)
 PLAYERS_PER_SIDE   = 5
-MIN_DURATION_S     = 15 * 60       # 16 rounds cannot finish faster
+MIN_DURATION_S     = 12 * 60       # 13 rounds cannot finish faster
 MAX_DURATION_S     = 5 * 3600      # longer than any plausible MR12 + overtime
 
 QUARANTINE_REASONS = ("tick_rate_not_128", "too_few_rounds", "not_5v5", "unknown_map",
@@ -903,6 +903,51 @@ def _scores(rounds: pl.DataFrame, rosters: pl.DataFrame) -> tuple[list, list]:
     return ct_before, t_before
 
 
+def _is_knife_item(name) -> bool:
+    from engine.state.players import weapon_class
+    return weapon_class(name) == "knife"
+
+
+def knife_round_nums(ticks: pl.DataFrame, rounds: pl.DataFrame) -> list[int]:
+    """Rounds where, at the first tick at or after freeze end, every alive player holds
+    nothing but knives (or an empty inventory). awpy 3.1 exposes no `is_knife_round`,
+    so the knife round is detected from the data (MED-35, 2026-10-19). Rounds without
+    any alive player at that tick are not judged."""
+    if ticks.height == 0 or rounds.height == 0 or "inventory" not in ticks.columns:
+        return []
+    out = []
+    for r in rounds.select("round_num", "freeze_end_tick").to_dicts():
+        fe = r["freeze_end_tick"]
+        if fe is None:
+            continue
+        rows = ticks.filter((pl.col("round_num") == r["round_num"]) & (pl.col("tick") >= fe) & pl.col("is_alive"))
+        if rows.height == 0:
+            continue
+        first = rows.filter(pl.col("tick") == rows["tick"].min())
+        inventories = first["inventory"].to_list()
+        if inventories and all(all(_is_knife_item(x) for x in (inv or [])) for inv in inventories):
+            out.append(int(r["round_num"]))
+    return out
+
+
+def drop_rounds(tables: dict, nums: list[int]) -> dict:
+    """Remove the given rounds from every table that has `round_num` and renumber the
+    rest consecutively, so halves and overtime are counted from the first real round."""
+    if not nums:
+        return tables
+    drop = set(int(n) for n in nums)
+    keep = sorted(int(n) for n in tables["rounds"]["round_num"].to_list() if int(n) not in drop)
+    remap = {old: new for new, old in enumerate(keep, 1)}
+    out = {}
+    for name, df in tables.items():
+        if "round_num" in df.columns and df.height:
+            df = df.filter(~pl.col("round_num").is_in(list(drop)))
+            df = df.with_columns(pl.col("round_num").replace_strict(remap, default=None,
+                                                                    return_dtype=df.schema["round_num"]))
+        out[name] = df
+    return out
+
+
 def _build_rounds(rounds: pl.DataFrame, bomb: pl.DataFrame, rosters: pl.DataFrame) -> pl.DataFrame:
     if rounds.height == 0:
         return empty("rounds")
@@ -962,6 +1007,10 @@ def parse(path, *, demo=None, footsteps: bool = True) -> tuple[dict[str, pl.Data
     ticks   = _build_ticks(snap, kills, damages, _plant_intervals(braw, rounds), blinds, tick_rate)
     bomb    = _build_bomb(braw, rounds, snap, dropped)
     rosters = _side_rosters(snap, rounds)
+    knife   = knife_round_nums(ticks, rounds)
+    if knife:
+        rounds = rounds.with_columns(pl.when(pl.col("round_num").is_in(knife)).then(True)
+                                       .otherwise(pl.col("is_knife")).alias("is_knife"))
 
     tables = {
         "rounds":      _build_rounds(rounds, bomb, rosters),
@@ -980,6 +1029,9 @@ def parse(path, *, demo=None, footsteps: bool = True) -> tuple[dict[str, pl.Data
         "items":       _build_items(demo, rounds, dropped),
     }
 
+    knife_nums = rounds.filter(pl.col("is_knife").fill_null(False))["round_num"].to_list()
+    tables = drop_rounds(tables, knife_nums)             # MED-35: knife rounds never sampled or scored
+
     if meta["duration_s"] is None and rounds.height and tick_rate:
         span = rounds["_hi"].max() - rounds["_lo"].min()
         meta["duration_s"] = float(span) / tick_rate if span is not None else None
@@ -990,10 +1042,10 @@ def parse(path, *, demo=None, footsteps: bool = True) -> tuple[dict[str, pl.Data
         awpy_version = None
     meta.update({
         "demo_sha256":  sha256_file(p) if p.is_file() else None,
-        "n_rounds":     int(rounds.height),
+        "n_rounds":     int(tables["rounds"].height),
         "players":      _roster(demo),
         "side_counts":  _side_counts(rosters),
-        "knife_rounds": rounds.filter(pl.col("is_knife").fill_null(False))["round_num"].to_list(),
+        "knife_rounds": [int(n) for n in knife_nums],   # original numbers of the rounds dropped
         "dropped_rows": dropped,
         "unavailable":  unavailable_fields(tables),
         "awpy_version": awpy_version,

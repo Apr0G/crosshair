@@ -109,7 +109,9 @@ and the free Downloads tier is 1,500 requests or 200 GB per month, so step 2's
   `... -m engine.evaluation.anchors --model-dir data\engine\models\wp_v<N> --scored <actions_scored.parquet> --actions <actions.parquet> --states <states.parquet>`
   writes `data\engine\eval\anchors_wp_v<N>.md`. Bands are informational; out-of-band
   results go into the review. Player-level correlation needs
-  `test\engine\fixtures\hltv_ratings.csv` filled by hand for ≥ 50 test matches
+  `data\engine\eval\hltv_ratings.csv` (gitignored; copy the header-only template
+  `test\engine\fixtures\hltv_ratings.csv`, never fill the template itself: SteamIDs
+  and nicknames must not enter the public repo) filled by hand for ≥ 50 test matches
   (columns `match_key,map,steamid64,player_name,hltv_rating`, `match_key` as the
   engine names the match). Man advantage needs a `W` column on the states.
   `engine.cli eval --anchors` points at `engine.eval.anchors`, which is not where the

@@ -53,6 +53,8 @@ def main() -> int:
         meta = {k: v for k, v in GOOD.items() if k != key and k != f"{key}_raw"}
         check(f"missing key {key} is judged, not skipped", q.check(meta) is not None, str(q.check(meta)))
     check("16 rounds is enough", q.check({**GOOD, "n_rounds": 16}) is None)
+    check("13 rounds (a 13-0 MR12 map) is enough, 12 is not (MED-42)",
+          q.check({**GOOD, "n_rounds": 13}) is None and q.check({**GOOD, "n_rounds": 12}) == "too_few_rounds")
     check("known_maps override", q.check({**GOOD, "map": "de_cache"}, known_maps={"de_cache"}) is None)
     check("every reason is a declared directory name", {c[1] for c in cases} <= set(q.REASONS))
     check("one reason vocabulary with the parser", set(q.REASONS) == {q.UNREADABLE, *ap.QUARANTINE_REASONS})

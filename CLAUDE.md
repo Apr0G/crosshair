@@ -6,7 +6,7 @@ CS2 impact-attribution engine. Scrapes FACEIT demos → parses with awpy → SQL
 LightGBM win-probability model → per-action impact (WP delta). Treat the existing
 pipeline as working software, not a draft.
 
-> **Engine v2 (2026-10-19, `docs/ENGINE_PLAN.md` + Amendment 1).** The legacy `src/`
+> **Engine v2 (2026-10-19, `docs/ENGINE_PLAN.md` + Amendments 1 and 2).** The legacy `src/`
 > pipeline described in the paragraph above and in the sections marked
 > *[obsolete since Amendment 1, 2026-10-19 — see **Engine v2**]* was deleted; the
 > engine is now the `engine/` package. Those sections are kept for history only. Every rule that still applies is restated, with
@@ -57,8 +57,14 @@ pipeline as working software, not a draft.
 
 ## Engine v2
 
-The engine since 2026-10-19: `docs/ENGINE_PLAN.md` (phases P0–P12, Amendment 1 at the
-end). Progress and what is deferred: `docs/ENGINE_PROGRESS.md` (Faig maintains it).
+**Aim since Amendment 2 (2026-10-19 evening): sell to FACEIT / ESL FACEIT Group and let
+FACEIT players analyse their own matches. The baseline tier is `faceit_10` (all ten
+players level 10), not pros. Pro demos are a transfer test only. No automated access to
+hltv.org (its terms forbid it); `engine/sources/hltv.py` is dormant. Every "pro" below
+reads "baseline tier `faceit_10`" unless it says otherwise.**
+
+The engine since 2026-10-19: `docs/ENGINE_PLAN.md` (phases P0–P12, Amendments 1 and 2
+at the end). Progress and what is deferred: `docs/ENGINE_PROGRESS.md` (Faig maintains it).
 Other docs: `docs/ENGINE_ENV.md`, `docs/ENGINE_CLI.md`, `docs/ENGINE_MODELS.md`,
 `docs/ENGINE_OPS.md`, `docs/DATA_SOURCES.md`, `engine/state/SCHEMA_CHANGELOG.md`.
 
@@ -146,19 +152,24 @@ evaluation/             anchors (P11.1), review (P11.2), robustness (P11.3), usa
 states and actions are separate CLI stages. A source exposes
 `iter_unprocessed_demos(...)` and `download_demo(url, dest)`.
 
-### Acceptance tests (Faig's conditions, plan 1.3)
+### Acceptance tests (Faig's conditions, plan 1.3; "pro" = baseline tier `faceit_10` since Amendment 2)
 - **C1** No faulty result from two actions on one tick: a zero-effect action gets
   exactly 0 next to a teammate's −0.5 action (`test_attribution_shapley.py`
-  `null_action_same_tick`: `V_A == 0 ± 1e-9`, `V_B == ΔW ± 1e-9`, on the real model);
-  conservation `|Σ V − (W_end − W_start)| < 1e-6` on every golden round and 1,000
-  sampled pro rounds.
-- **C2** Every valued action carries `V, Q, B, D, R, X`; `V = B + D + X` to 1e-9; a
-  neighbour panel with ≥ 1 entry for ≥ 95% of pro actions (`test_decision_split.py`).
+  `null_action_same_tick`). Two bounds, decided 2026-10-19: with a stub `W`,
+  `V_A == 0 ± 1e-9` and `V_B == ΔW ± 1e-9` exactly; on the real model (`--real`,
+  P8.2.4) `|V_A| ≤ 0.002` and `|V_B − ΔW| ≤ 0.002` over 200 real kill windows, since a
+  real model is never exactly indifferent. Conservation
+  `|Σ V − (W_end − W_start)| < 1e-6` on every golden round and 1,000 sampled pro rounds.
+- **C2** Every valued action carries `V, Q, B, D, R, X`; `V = B + D + X` to 1e-9 (a
+  plumbing guard only: `D = Q − B` and `X = V − Q`, so it cannot fail on its own); the
+  checks that can fail are `R ≤ 0`, Q tracking realized V, and a neighbour panel with
+  ≥ 1 entry for ≥ 95% of pro actions (`test_decision_split.py`).
 - **C3** `bench/bench_analyze.py` on the golden demo: target ≤ 60 s GPU / ≤ 180 s CPU
   end to end; hard ceiling 120 s / 300 s, above which v1 is not done.
 
 ### Decision rules and gates
-- **P6.7.2** (full text in `docs/ENGINE_MODELS.md`): adopt the NN only if it beats
+- **P6.7.2** (full text in `docs/ENGINE_MODELS.md`; "pro test" = `faceit_10` test months
+  since Amendment 2): adopt the NN only if it beats
   LightGBM on pro test log loss by ≥ 0.01 **and** ECE ≤ 0.02, else back to features
   before any attribution; keep FACEIT only if it helps pro log loss; keep temporal
   encoder / pairwise bias only for ≥ 0.003 log loss or better drift; hazard head AUC

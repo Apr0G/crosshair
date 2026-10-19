@@ -14,9 +14,15 @@ Per type class c and score column (X, D), from players with at least 2 actions i
     σ²_skill = max(ε, Var_p(x̄_p) − σ²_noise / n̄)        (Var with ddof = 1)
     k        = σ²_noise / σ²_skill  (> 0)
 
-    x̃ = x̄ · n / (n + k)          90% half-width = 1.645 · sqrt(σ²_noise / (n + k))
+    x̃ = m_c + (x̄ − m_c) · n / (n + k)    90% half-width = 1.645 · sqrt(σ²_noise / (n + k))
 
-Shrinkage is toward 0, the population mean of X and D by construction.
+Shrinkage is toward the class mean m_c (Σ n_p x̄_p / Σ n_p over the fitted players),
+not toward 0: D = Q − B has a non-zero class mean, so pulling it to 0 would reward
+volume (B.8 amended; Appendix H 8, decided 2026-10-19).
+
+`fit_from_models(frame, h, q, b, vocab)` computes X and D for a valued frame from the
+trained Q / B nets and fits; `train-q` calls it on the train rows and writes
+`shrinkage.json` next to the Q model (MED-34).
 
 Frame columns read: `actor_id_hash` (player), `type`, `X`, `D` (null rows dropped per
 column).
@@ -67,9 +73,9 @@ def with_class(frame: pl.DataFrame) -> pl.DataFrame:
 
 # ── formulas ──────────────────────────────────────────────────────────────────
 
-def shrink(mean: float, n, k: float):
-    """x̄ · n / (n + k) (works on scalars and numpy arrays)."""
-    return mean * n / (n + k)
+def shrink(mean: float, n, k: float, centre: float = 0.0):
+    """centre + (x̄ − centre) · n / (n + k) (works on scalars and numpy arrays)."""
+    return centre + (mean - centre) * n / (n + k)
 
 
 def factor(n, k: float):
@@ -95,7 +101,8 @@ def _fit_one(players: pl.DataFrame, eps: float) -> dict | None:
     k = s2_noise / s2_skill
     if not math.isfinite(k) or k <= 0:
         k = eps                          # no noise at all: trust the raw mean
-    return {"k": float(k), "sigma2_noise": s2_noise, "sigma2_skill": s2_skill,
+    mean_all = float((p["mean"].to_numpy() * n).sum() / n.sum())        # the class mean: the shrink target
+    return {"k": float(k), "sigma2_noise": s2_noise, "sigma2_skill": s2_skill, "mean_all": mean_all,
             "var_means": var_means, "n_bar": n_bar, "n_players": int(p.height), "n_actions": int(n.sum())}
 
 
@@ -139,16 +146,31 @@ def player_aggregates(frame: pl.DataFrame, k_map: dict, *, values=VALUES) -> pl.
             pl.col(by).cast(pl.String).replace_strict({c: fit["k"] for c, fit in fits.items()}, default=None,
                                                       return_dtype=pl.Float64).alias("_k"),
             pl.col(by).cast(pl.String).replace_strict({c: fit["sigma2_noise"] for c, fit in fits.items()},
-                                                      default=None, return_dtype=pl.Float64).alias("_s2"))
+                                                      default=None, return_dtype=pl.Float64).alias("_s2"),
+            pl.col(by).cast(pl.String).replace_strict({c: fit.get("mean_all", 0.0) for c, fit in fits.items()},
+                                                      default=None, return_dtype=pl.Float64).alias("_m"))
         nn = pl.col(f"{v}_n").cast(pl.Float64)
         st = st.with_columns(
             (nn / (nn + pl.col("_k"))).alias(f"{v}_factor"),
-            (pl.col(f"{v}_mean") * nn / (nn + pl.col("_k"))).alias(f"{v}_tilde"),
+            (pl.col("_m") + (pl.col(f"{v}_mean") - pl.col("_m")) * nn / (nn + pl.col("_k"))).alias(f"{v}_tilde"),
             (Z90 * (pl.col("_s2") / (nn + pl.col("_k"))).sqrt()).alias(f"{v}_ci"))
         st = st.with_columns((pl.col(f"{v}_tilde") - pl.col(f"{v}_ci")).alias(f"{v}_lo"),
-                             (pl.col(f"{v}_tilde") + pl.col(f"{v}_ci")).alias(f"{v}_hi")).drop("_k", "_s2")
+                             (pl.col(f"{v}_tilde") + pl.col(f"{v}_ci")).alias(f"{v}_hi")).drop("_k", "_s2", "_m")
         base = base.join(st, on=[PLAYER, by], how="left")
     return base
+
+
+def fit_from_models(frame: pl.DataFrame, h, q, b, vocab, *, by: str = "type_class") -> dict:
+    """X and D of every row of a valued frame from the trained Q / B nets, then `fit_k`.
+    `frame` needs `actor_id_hash`, `type`, `V`, `tier`, `actor_side` and the `desc_*`
+    columns; `h` is its h_pre matrix (MED-34, 2026-10-19)."""
+    from engine.value import descriptors, q_model
+    ids = descriptors.ids_from_frame(frame, vocab)
+    Q = q_model.predict_q(q, h, ids, frame["tier"].to_list(), frame["actor_side"].to_list())
+    B = q_model.predict_b(b, h, frame["tier"].to_list(), frame["actor_side"].to_list())
+    V = frame["V"].to_numpy().astype(np.float64)
+    scored = frame.select(PLAYER, "type").with_columns(pl.Series("D", Q - B), pl.Series("X", V - Q))
+    return fit_k(scored, by=by)
 
 
 # ── files ─────────────────────────────────────────────────────────────────────

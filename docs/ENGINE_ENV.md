@@ -88,7 +88,7 @@ are dropped; on a shared boundary tick the later round wins.
 | `rounds.*_tick`, `round_num` | `rounds`, same names; `official_end_tick` is null for the last round (awpy); a null `start_tick` (never-null in schema.py) falls back to the previous round's end, then `freeze_end_tick` |
 | `rounds.winner_side`, `end_reason` | `winner_side` (fallback: `winner` team number), `reason_name` |
 | `rounds.bomb_planted` | any `plant_complete` in the round |
-| `rounds.ct/t_score_before` | derived: teams tracked by roster overlap with round 1's CT side (handles the halftime swap); knife rounds (`is_knife_round`) score nothing; null when there are no ticks |
+| `rounds.ct/t_score_before` | derived: teams tracked by roster overlap with round 1's CT side (handles the halftime swap); null when there are no ticks. awpy 3.1 has no `is_knife_round`: a knife round is detected from the data (every alive player holds only knives at freeze end), dropped from every table and the rest renumbered; the dropped numbers are `meta.knife_rounds` (MED-35) |
 | `ticks.vx/vy/vz` | `velocity_x/y/z` |
 | `ticks.has_c4`, `is_ducking` | `has_bomb`, `is_crouched` |
 | `ticks` rows | `snapshots` rows with a ct/t side (spectator / caster rows dropped) |
@@ -152,7 +152,7 @@ none; the quarantine side count ignores steamid 0 (a bot-filled side fails `not_
 
 `header_info(path)` reads the header only; `with_roster=True` (used by `worker` before
 every parse, by `--smoke` and by `analyze`) also reads `rounds` and `players`. Reasons, in order: `tick_rate_not_128` (|rate - 128|
-> 0.5, or unknown), `too_few_rounds` (< 16), `not_5v5` (distinct non-bot players per
+> 0.5, or unknown), `too_few_rounds` (< 13, a completed MR12 map), `not_5v5` (distinct non-bot players per
 side != 5), `unknown_map` (not in `engine.maps.assets.ACTIVE_POOL`),
 `duration_implausible` (playback time outside 15 min to 5 h). `config.yaml` has no
 quarantine keys (Appendix D lists none), so the thresholds are constants at the top of

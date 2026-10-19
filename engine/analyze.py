@@ -356,6 +356,44 @@ def check_model(model_dir: Path, allow_unadopted: bool = False, doc: Path | None
 VALUE_HINTS = ("train one with `train-q`", "build one with `build-neighbours`")
 
 
+def model_hazard_auc(model_dir: Path | None) -> float | None:
+    """The model's hazard-head AUC on test pro from `<model_dir>/eval.json` (written by
+    `calibrate`), else None."""
+    if model_dir is None:
+        return None
+    p = Path(model_dir) / "eval.json"
+    if not p.is_file():
+        return None
+    try:
+        v = json.loads(p.read_text(encoding="utf-8")).get("hazard_auc")
+        return float(v) if v is not None else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def apply_hazard_rule(cfg, model_dir: Path | None, warnings: list, logger=None):
+    """P6.7.2's hazard-head rule (MED-39, 2026-10-19): AUC below `sanity.hazard_auc_floor`
+    forces `enabler_mode: fixed` for this analysis and warns; between the floor and
+    `sanity.hazard_auc_target` every report warns "hazard head below target"; an
+    unknown AUC warns once. Returns the (possibly replaced) config."""
+    from dataclasses import replace as _replace
+    if cfg.attribution.enabler_mode != "hazard":
+        return cfg
+    auc = model_hazard_auc(model_dir)
+    if auc is None:
+        _warn(warnings, "hazard_auc_unknown", "the model records no hazard AUC (no eval.json from calibrate); "
+              "enabler splits use the hazard head unchecked", logger)
+        return cfg
+    if auc < cfg.sanity.hazard_auc_floor:
+        _warn(warnings, "fixed_share_fallback", f"hazard AUC {auc:.3f} is below the floor "
+              f"{cfg.sanity.hazard_auc_floor}: enabler shares are the configured fixed shares (P8.5.3)", logger)
+        return _replace(cfg, attribution=_replace(cfg.attribution, enabler_mode="fixed"))
+    if auc < cfg.sanity.hazard_auc_target:
+        _warn(warnings, "hazard_below_target", f"hazard head below target: AUC {auc:.3f} < "
+              f"{cfg.sanity.hazard_auc_target}", logger)
+    return cfg
+
+
 def check_value_models(value_dirs: tuple, allow_unadopted: bool, warnings: list, logger=None,
                        doc: Path | None = None, models_dir: Path | None = None) -> None:
     """The adoption gate for the value stage (P12.1 applies to every model a report
@@ -885,6 +923,7 @@ def analyze_demo(path, *, tier: str, out_dir, model_dir=None, device: str | None
             _warn(warnings, "model_unadopted", f"model {model_dir.name} is not adopted (--allow-unadopted)", logger)
         predictor = load_predictor(model_dir, device)
         model_versions["wp"] = model_dir.name
+        cfg = apply_hazard_rule(cfg, model_dir, warnings, logger)
     else:
         model_versions["wp"] = getattr(predictor, "name", None) or type(predictor).__name__
     vm = None

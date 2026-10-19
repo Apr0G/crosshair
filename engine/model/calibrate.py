@@ -310,6 +310,11 @@ def main(argv: list[str] | None = None) -> int:
     cal["checkpoint"], cal["state_hash"] = ckpt.name, checkpoints.state_hash(model.state_dict())   # MED-20
     save_calibration(a.model_dir, cal)
     res = train.evaluate(model, test, device, cfg=cfg, calibration=cal, vocab=vocab)
+    # eval.json: the test-pro numbers the registry lists and analyze reads (hazard AUC rule, MED-39)
+    slim = {k: v for k, v in res.items() if isinstance(v, (int, float, str, bool)) or v is None}
+    slim["checkpoint"] = ckpt.name
+    (Path(a.model_dir) / "eval.json").write_text(json.dumps(slim, indent=2, sort_keys=True, default=str),
+                                                  encoding="utf-8")
     name = Path(a.model_dir).name
     out = paths.EVAL_DIR / f"{name}_calibration_{date.today().isoformat()}.md"
     out.parent.mkdir(parents=True, exist_ok=True)

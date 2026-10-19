@@ -572,11 +572,103 @@ def med_29() -> None:
     check("main() passes the exclusions to select_review_rounds", "select_review_rounds(frame, a.n, a.seed, exclude=exclude)" in src)
 
 
+def med_35() -> None:
+    """2026-10-19 MED-35: awpy 3.1 has no is_knife_round; knife rounds are now detected
+    from knife-only inventories at freeze end, dropped and the rest renumbered."""
+    import polars as pl
+    from engine.parse import awpy3_parser as ap
+    rounds = pl.DataFrame({"round_num": [1, 2, 3], "freeze_end_tick": [100, 1000, 2000]})
+    ticks = pl.DataFrame({
+        "round_num": [1, 1, 2, 2, 3, 3], "tick": [100, 100, 1000, 1000, 2000, 2000],
+        "steamid": [1, 2, 1, 2, 1, 2], "is_alive": [True] * 6,
+        "inventory": [["Karambit"], ["knife_t"], ["ak47", "knife"], ["glock"], ["knife"], ["awp"]]})
+    check("round 1 (knives only) is a knife round; 2 and 3 are not", ap.knife_round_nums(ticks, rounds) == [1])
+    tabs = ap.drop_rounds({"rounds": rounds, "ticks": ticks}, [1])
+    check("the knife round is dropped and the rest renumbered 1..n",
+          tabs["rounds"]["round_num"].to_list() == [1, 2] and sorted(set(tabs["ticks"]["round_num"].to_list())) == [1, 2]
+          and tabs["rounds"]["freeze_end_tick"].to_list() == [1000, 2000])
+
+
+def med_36_37() -> None:
+    """2026-10-19 MED-36 / MED-37: the anchors report fell back to the raw SteamID64, and
+    the ratings CSV defaulted to a tracked fixture meant to be filled with real ids."""
+    import polars as pl
+    from engine import paths
+    from engine.evaluation import anchors as an
+    from engine.state.players import player_id_hash
+    sid = 76561198000000001
+    rows = [{"match_key": "pm", "round_num": r, "action_id": f"a{r}", "actor_id_hash": player_id_hash(sid),
+             "actor_side": "ct", "type": "kill", "V": 0.05} for r in range(1, 4)]
+    rows += [{**rows[0], "actor_id_hash": player_id_hash(sid + k), "action_id": f"b{k}", "V": 0.01 * k} for k in (1, 2, 3)]
+    frame = pl.DataFrame(rows)
+    csv_path = TMP / "m36.csv"
+    lines = [",".join(an.HLTV_COLUMNS), f"pm,de_mirage,{sid},,1.20"]
+    lines += [f"pm,de_mirage,{sid + k},p|{k},{1.0 + 0.05 * k:.2f}" for k in (1, 2, 3)]
+    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    pr = an.player_rating_correlation(frame, csv_path)
+    players = [d["player"] for d in pr.get("disagreements", [])]
+    check("a ratings row without a name shows the p_<hex> label, never the SteamID64",
+          players and all(str(sid) not in p for p in players) and any(p.startswith("p_") for p in players), str(players))
+    check("'|' in a name is escaped for the markdown table", any("p\\|" in p for p in players), str(players))
+    src = (ROOT / "engine" / "evaluation" / "anchors.py").read_text(encoding="utf-8")
+    check("the ratings CSV defaults to data/engine/eval (gitignored), not the tracked fixture",
+          'paths.EVAL_DIR / "hltv_ratings.csv"' in src and str(paths.EVAL_DIR).startswith(str(paths.DATA_DIR)))
+    fixture = ROOT / "test" / "engine" / "fixtures" / "hltv_ratings.csv"
+    check("the tracked fixture is a header-only template",
+          [l for l in fixture.read_text(encoding="utf-8").splitlines() if l.strip()] == [",".join(an.HLTV_COLUMNS)])
+
+
+def med_38() -> None:
+    """2026-10-19 MED-38: train-q and build-neighbours accepted input with no split."""
+    import subprocess, sys as _sys
+    for cmd in ("train-q", "build-neighbours"):
+        p = subprocess.run([_sys.executable, "-m", "engine.cli", cmd, "--valued", "x.parquet", "--log-dir", str(TMP / "logs")],
+                           cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        check(f"{cmd} without --split-file exits 2 and says so", p.returncode == 2 and "--split-file" in p.stderr, p.stderr[-200:])
+
+
+def med_39() -> None:
+    """2026-10-19 MED-39: P6.7.2's hazard-head rule was not implemented."""
+    import json
+    from engine import analyze, config
+    from engine.evaluation import registry as rg
+    cfg = config.load()
+    good = {"logloss": 0.46, "brier": 0.15, "ece": 0.012, "baseline_logloss": 0.49}
+    check("adoption requires hazard_auc", any("hazard_auc" in p for p in rg.rule_problems("wp_v1", good)))
+    check("adoption refuses a hazard AUC below the floor", any("floor" in p for p in rg.rule_problems("wp_v1", {**good, "hazard_auc": 0.6})))
+    check("a hazard AUC at the target passes", rg.rule_problems("wp_v1", {**good, "hazard_auc": 0.81}) == [])
+    d = TMP / "m39"
+    for name, auc in (("wp_lo", 0.6), ("wp_mid", 0.78), ("wp_hi", 0.85)):
+        (d / name).mkdir(parents=True)
+        (d / name / "eval.json").write_text(json.dumps({"hazard_auc": auc}), encoding="utf-8")
+    w: list = []
+    c_lo = analyze.apply_hazard_rule(cfg, d / "wp_lo", w)
+    check("below the floor: enabler_mode forced to fixed with a fixed_share_fallback warning",
+          c_lo.attribution.enabler_mode == "fixed" and [x["code"] for x in w] == ["fixed_share_fallback"], str(w))
+    w = []
+    c_mid = analyze.apply_hazard_rule(cfg, d / "wp_mid", w)
+    check("between floor and target: hazard mode kept, 'hazard head below target' warning",
+          c_mid.attribution.enabler_mode == "hazard" and [x["code"] for x in w] == ["hazard_below_target"]
+          and "below target" in w[0]["message"], str(w))
+    w = []
+    check("at target: no warning", analyze.apply_hazard_rule(cfg, d / "wp_hi", w).attribution.enabler_mode == "hazard" and w == [])
+    w = []
+    check("unknown AUC: one hazard_auc_unknown warning", analyze.apply_hazard_rule(cfg, d / "none", w) is cfg
+          and [x["code"] for x in w] == ["hazard_auc_unknown"])
+
+
+def med_42() -> None:
+    """2026-10-19 MED-42: the quarantine floor refused 13-0 .. 13-2 MR12 maps."""
+    from engine.parse import awpy3_parser as ap
+    check("MIN_ROUNDS is 13 (a completed MR12 map)", ap.MIN_ROUNDS == 13
+          and ap.quarantine_check({"n_rounds": 13}) is None and ap.quarantine_check({"n_rounds": 12}) == "too_few_rounds")
+
+
 # ── runner ────────────────────────────────────────────────────────────────────
 
 ITEMS = [crit_01, high_01, high_02, high_03, high_04, high_05, high_06, med_02, med_04, med_06,
          med_07, med_08, med_09, med_10, med_14, med_17, med_18_19, med_20,
-         med_24, med_26, med_27, med_28, med_29]
+         med_24, med_26, med_27, med_28, med_29, med_35, med_36_37, med_38, med_39, med_42]
 
 section("audit items (docs/reviews)")
 for fn in ITEMS:

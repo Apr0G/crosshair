@@ -101,11 +101,16 @@ def require_adopted(name: str, allow_unadopted: bool = False, doc: Path | None =
                          f"adopt it (P6.7.2) or pass --allow-unadopted")
 
 
-def rule_problems(name: str, numbers: dict, ece_max: float = ECE_MAX) -> list[str]:
-    """Why `numbers` fail P6.7.2 for a wp model ([] = passes; other kinds always [])."""
+HAZARD_AUC_FLOOR = 0.75           # P6.7.2: below this the hazard head is unusable (sanity.hazard_auc_floor)
+
+
+def rule_problems(name: str, numbers: dict, ece_max: float = ECE_MAX, hazard_floor: float = HAZARD_AUC_FLOOR) -> list[str]:
+    """Why `numbers` fail P6.7.2 for a wp model ([] = passes; other kinds always []).
+    The hazard AUC is required and must reach the floor (MED-39, 2026-10-19); between
+    the floor and the target `analyze` warns on every report."""
     if kind_of(name) != "wp":
         return []
-    need = [k for k in ("logloss", "brier", "ece", "baseline_logloss") if numbers.get(k) is None]
+    need = [k for k in ("logloss", "brier", "ece", "baseline_logloss", "hazard_auc") if numbers.get(k) is None]
     if need:
         return [f"missing {need}"]
     out = []
@@ -114,6 +119,8 @@ def rule_problems(name: str, numbers: dict, ece_max: float = ECE_MAX) -> list[st
         out.append(f"log loss beats the baseline by {margin:.4f} < {LOGLOSS_MARGIN}")
     if float(numbers["ece"]) > ece_max:
         out.append(f"ECE {float(numbers['ece']):.4f} > {ece_max}")
+    if float(numbers["hazard_auc"]) < hazard_floor:
+        out.append(f"hazard AUC {float(numbers['hazard_auc']):.3f} < floor {hazard_floor} (enabler splits would be fixed shares)")
     return out
 
 
@@ -161,7 +168,8 @@ def adopt(name: str, numbers: dict, rule: str, *, doc: Path | None = None, when:
     if any(r["model"] == name for r in adoption_rows(doc)):
         raise ValueError(f"{name} already has a row; change its status in place instead")
     ece_max = float(cfg.calib.ece_target) if cfg is not None else ECE_MAX
-    bad = rule_problems(name, numbers, ece_max)
+    floor = float(cfg.sanity.hazard_auc_floor) if cfg is not None else HAZARD_AUC_FLOOR
+    bad = rule_problems(name, numbers, ece_max, floor)
     if bad:
         raise ValueError(f"{name} does not satisfy P6.7.2: {'; '.join(bad)}")
     if not doc.is_file():

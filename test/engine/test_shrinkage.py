@@ -56,8 +56,16 @@ inside = np.abs(agg["X_tilde"].to_numpy() - truth) <= agg["X_ci"].to_numpy()
 cov = float(inside.mean())
 check("true skill inside the 90% interval for 90% ± 3% of players", abs(cov - 0.90) <= 0.03, f"{cov:.1%}")
 check("aggregates: one row per player and class with n", agg.height == 2000 and int(agg["n"].sum()) == frame.height)
-check("X_tilde = X_mean · n / (n + k)",
-      np.allclose(agg["X_tilde"].to_numpy(), agg["X_mean"].to_numpy() * agg["n"].to_numpy() / (agg["n"].to_numpy() + fk["k"])))
+m_all = fk["mean_all"]
+check("X_tilde = m_c + (X_mean − m_c) · n / (n + k), toward the class mean (B.8 amended, MED-43)",
+      np.allclose(agg["X_tilde"].to_numpy(),
+                  m_all + (agg["X_mean"].to_numpy() - m_all) * agg["n"].to_numpy() / (agg["n"].to_numpy() + fk["k"])))
+shifted = frame.with_columns((pl.col("X") + 0.5).alias("X"))
+fit_s = sh.fit_k(shifted)
+agg_s = sh.player_aggregates(shifted, fit_s)
+check("a class with mean +0.5 shrinks toward +0.5, not toward 0 (a 2-action player's X_tilde is near +0.5)",
+      abs(fit_s["X"]["kill"]["mean_all"] - 0.5) < 0.01
+      and abs(float(agg_s.sort("n")["X_tilde"][0]) - 0.5) < 0.1, f"{fit_s['X']['kill']['mean_all']:.3f}")
 check("shrunk estimate beats the raw mean (MSE)",
       float(((agg["X_tilde"].to_numpy() - truth) ** 2).mean()) < float(((agg["X_mean"].to_numpy() - truth) ** 2).mean()))
 check("D fitted and shrunk too", "kill" in fit["D"] and agg["D_tilde"].null_count() == 0)

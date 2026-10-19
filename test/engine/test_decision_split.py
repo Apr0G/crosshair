@@ -107,9 +107,18 @@ fields_ok = all(all(getattr(s, f) is not None for f in ("V", "Q", "B", "D", "R",
                                                          "verdict_execution", "descriptor_key")) for s in scored)
 check("every action has V, Q, B, D, R, X, both verdicts", fields_ok)
 err = max(abs(s.B + s.D + s.X - s.V) for s in scored)
-check("identity V = B + D + X to 1e-9", err <= 1e-9, f"max |err| = {err:.1e}")
+check("identity V = B + D + X to 1e-9 (plumbing guard: definitional, cannot fail on its own)", err <= 1e-9,
+      f"max |err| = {err:.1e}")
+rho_qv = qm.spearman([s.Q for s in scored], [s.V for s in scored])
+check("Q tracks realized V on held-out actions (Spearman > 0.2; the check that CAN fail, MED-33)",
+      rho_qv > 0.2, f"rho = {rho_qv:.3f}")
 check("D = Q − B and X = V − Q", all(s.D == s.Q - s.B and s.X == s.V - s.Q for s in scored))
 check("R <= 0 on every action", all(s.R <= 0.0 for s in scored), f"min R = {min(s.R for s in scored):.4f}")
+from engine.value import shrinkage as sh_mod                                      # noqa: E402
+fit_sh = sh_mod.fit_from_models(corpus.filter(pl.Series(train_rows)), hc[train_rows], q, b, vocab)
+check("shrinkage fitted from the trained Q / B nets on the train rows (MED-34)",
+      all(len(fit_sh.get(v, {})) >= 1 for v in sh_mod.VALUES) and all(f["k"] > 0 for v in sh_mod.VALUES for f in fit_sh[v].values()),
+      str({v: list(fit_sh.get(v, {})) for v in sh_mod.VALUES}))
 with_panel = sum(s.panel is not None and len(s.panel.entries) >= 1 for s in scored) / len(scored)
 check("a panel with >= 1 entry for >= 95% of actions", with_panel >= 0.95, f"{with_panel:.1%}")
 check("panels are full (k neighbours) when present",

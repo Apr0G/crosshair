@@ -31,10 +31,87 @@ from engine.attribution import engine
 CFG   = config.load()
 DECOY = {"x": -3000.0, "y": -3000.0, "z": 0.0, "owner": 105, "start_tick": 5000}
 
+REAL_BOUND = 0.002           # P8.2.4: the real-model C1 bound (decided 2026-10-19)
+REAL_WINDOWS = 200
+
+
+def real_model_check() -> int:
+    """`--real`: the P8.2.4 variant on the adopted win model and the stored states. Exit
+    2 only when no adopted wp model or no stored states exist (MED-41)."""
+    from engine import paths
+    from engine.actions.windows import Window
+    from engine.counterfactual import sanity
+    from engine.data import layout
+    from engine.evaluation import registry
+    from engine.state.schema import UtilityToken
+    adopted = [r["model"] for r in registry.adoption_rows() if r["status"].lower() == "adopted" and r["kind"] == "wp"]
+    if not adopted:
+        print("null_action_same_tick (real model): no adopted wp model in docs/ENGINE_MODELS.md")
+        return 2
+    states = layout.find("states") if (paths.ENGINE_DIR / "states").is_dir() else []
+    if not states:
+        print("null_action_same_tick (real model): no stored states under data/engine/states")
+        return 2
+    from engine.model.predict import Predictor
+    predictor = Predictor(paths.MODELS_DIR / adopted[-1], require_calibration=True)
+    n, worst_decoy, worst_kill = 0, 0.0, 0.0
+    for sp in states:
+        snaps, acts, wins, _mv = sanity._load_match(sp)
+        by_id = {a.action_id: a for a in acts}
+        by_round: dict = {}
+        for s in snaps:
+            by_round.setdefault(s.meta.round_num, []).append(s)
+        for w in wins:
+            members = [by_id[i] for i in w.member_action_ids if i in by_id]
+            if len(members) != 1 or members[0].type != "kill":
+                continue
+            kill = members[0]
+            rs = sorted(by_round[w.round_num], key=lambda s: s.meta.tick)
+            post = next((s for s in rs if s.meta.tick == w.end_tick), None)
+            if post is None:
+                continue
+            far = (-3000.0 + min(p.x for p in post.players if p.x is not None) , -3000.0, 0.0)
+            decoy = action("decoy", kill.actor_id_hash, kind="durative", x=far[0], y=far[1], z=far[2])
+            pop   = action("decoy_start", kill.actor_id_hash, tick=kill.tick, parent_action_id=decoy.action_id)
+            pop.match_key = decoy.match_key = kill.match_key
+            pop.round_num = decoy.round_num = kill.round_num
+            tok = UtilityToken(kind="decoy", x=far[0], y=far[1], z=far[2], time_left_s=15.0,
+                               owner_side=kill.actor_side, owner_id=kill.actor_id_hash, radius_units=None)
+            edited = [s.copy() if s.meta.tick >= w.end_tick else s for s in rs]
+            for s in edited:
+                if s.meta.tick >= w.end_tick:
+                    s.utility.append(tok)
+            w2 = Window(window_id=w.window_id, round_num=w.round_num, start_tick=w.start_tick, end_tick=w.end_tick,
+                        member_action_ids=(kill.action_id, pop.action_id))
+            others = [x for x in wins if x.round_num == w.round_num and x.window_id != w.window_id]
+            ra = engine.attribute_round(edited, acts + [decoy, pop], others + [w2], predictor, CFG, pin_terminal=False)
+            f_decoy = comp_phi(ra, source="pop", action_id=decoy.action_id)
+            f_kill  = comp_phi(ra, source="window", action_id=kill.action_id)
+            dW = by_id_w(ra, w2.window_id)
+            worst_decoy = max(worst_decoy, abs(f_decoy))
+            worst_kill  = max(worst_kill, abs(f_kill - dW)) if dW is not None else worst_kill
+            n += 1
+            if n >= REAL_WINDOWS:
+                break
+        if n >= REAL_WINDOWS:
+            break
+    if n == 0:
+        print("null_action_same_tick (real model): the stored matches hold no single-kill window")
+        return 2
+    check(f"[real] |φ_decoy| ≤ {REAL_BOUND} over {n} real kill windows", worst_decoy <= REAL_BOUND, f"max {worst_decoy:.4f}")
+    check(f"[real] |φ_kill − ΔW| ≤ {REAL_BOUND} over {n} windows", worst_kill <= REAL_BOUND, f"max {worst_kill:.4f}")
+    return summary()
+
+
+def by_id_w(ra, window_id):
+    for iv in getattr(ra, "intervals", []) or []:
+        if getattr(iv, "window_id", None) == window_id:
+            return getattr(iv, "delta_w", None)
+    return None
+
+
 if "--real" in sys.argv:
-    print("null_action_same_tick (real model): DEFERRED to real data — needs a trained "
-          "Predictor and 200 real kill windows (|φ_decoy| ≤ 0.002, |φ_kill − ΔW| ≤ 0.002).")
-    sys.exit(2)
+    sys.exit(real_model_check())
 
 
 def comp_phi(ra, source=None, pseudo_type=None, action_id=None) -> float:
@@ -94,7 +171,8 @@ null_action_same_tick("ignores-decoys", StubPredictor(win=ignores_decoys))
 section("C1 null_action_same_tick — variant 2: RuleStub alive-count rule (ignores all utility)")
 null_action_same_tick("RuleStub", RuleStub(good_win))
 section("C1 null_action_same_tick — real model")
-skip("real-model bound |φ_decoy| ≤ 0.002 over 200 windows", "deferred to real data (run with --real: exits 2)")
+skip(f"real-model bound |φ_decoy| ≤ {REAL_BOUND} over {REAL_WINDOWS} windows",
+     "run with --real on a PC with an adopted model and stored states (exit 2 there until both exist)")
 
 # ── C1 in a 5-member window, exact and sampled ────────────────────────────────
 

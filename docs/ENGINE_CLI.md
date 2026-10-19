@@ -196,12 +196,13 @@ python -m engine.cli train-wp --vocab datasets\vocab_v1.json --norm datasets\nor
 ### `train-q`
 
 Trains the Q and B networks (P9.2) by calling `engine.value.q_model.train_q` on a
-valued-actions parquet. The descriptor vocabulary is fitted on the same frame; with
-`--split-file`, rows are assigned to train / val by `match_key` (others ignored),
-without it every row is train.
+valued-actions parquet. `--split-file` is required: rows are assigned to train / val by
+`match_key` (others ignored) and the descriptor vocabulary is fitted on the train rows
+only, so held-out months never leak into the Q / B nets (MED-38). Afterwards the
+shrinkage fit (P9.4.2) is written to `<model dir>/shrinkage.json` from the train rows.
 
 ```
-python -m engine.cli train-q --valued data\engine\eval\actions_valued_train.parquet [--split-file splits_v1.json] [--out DIR] [--cpu]
+python -m engine.cli train-q --valued data\engine\eval\actions_valued.parquet --split-file splits_v1.json [--wp-model wp_vN] [--out DIR] [--cpu]
 ```
 
 The parquet needs `h_pre` (embeddings from the adopted win model), `V`, `actor_side`,

@@ -284,13 +284,15 @@ def cmd_analyze(a, cfg, lg, run_id: str, timings: dict) -> int:
         raw = analyze.synthetic_raw(a.raw_tables_story, a.raw_tables_tick_rate)
         analyze.check_tick_rate(raw.meta)
         model_versions = {"wp": "stub" if stub else None}
+        warnings = []
         if predictor is None:
             md = analyze.resolve_model_dir(a.model, a.model_dir)
             analyze.check_model(md, a.allow_unadopted)
             predictor = analyze.load_predictor(md, device)
             model_versions["wp"] = md.name
+            cfg = analyze.apply_hazard_rule(cfg, md, warnings, lg)
         geo = FlatGeometry()
-        warnings = analyze.guard_warnings(raw.meta, a.tier, geo.map_version, lg)
+        warnings += analyze.guard_warnings(raw.meta, a.tier, geo.map_version, lg)
         key = a.demo.stem
         vm = None
         if value_dirs:
@@ -509,6 +511,9 @@ def _device() -> str:
 
 def cmd_train_q(a, cfg, lg, run_id: str, timings: dict) -> int:
     """Adapter: `q_model.train_q(frame, h, vocab, cfg, split_fn, device, out_dir=...)`."""
+    if a.split_file is None:
+        raise CLIError("train-q needs --split-file splits_v<N>.json: without it held-out months would be "
+                       "trained on silently (R4, MED-38)")
     frame, h = _valued_frame(a.valued)
     from engine.value import descriptors, q_model
     missing = [c for c in ("V", "actor_side", "tier", "type", *(f"desc_{f}" for f in descriptors.FIELDS))
@@ -522,7 +527,11 @@ def cmd_train_q(a, cfg, lg, run_id: str, timings: dict) -> int:
     else:
         def split_fn(f):
             return [which.get(k, "none") for k in f["match_key"].to_list()]
-    vocab = descriptors.DescriptorVocab.fit_frame(frame)
+    import polars as pl
+    train_mask = pl.Series([s == "train" for s in split_fn(frame)], dtype=pl.Boolean)
+    if not train_mask.any():
+        raise CLIError("no train rows: the split file names none of the valued frame's matches")
+    vocab = descriptors.DescriptorVocab.fit_frame(frame.filter(train_mask))      # train rows only (MED-38)
     t0 = time.perf_counter()
     try:
         _q, _b, metrics = q_model.train_q(frame, h, vocab, cfg, split_fn, "cpu" if a.cpu else _device(),
@@ -532,12 +541,22 @@ def cmd_train_q(a, cfg, lg, run_id: str, timings: dict) -> int:
     timings["train_q"] = time.perf_counter() - t0
     lg.info("trained Q/B", rows=frame.height,
             **{k: v for k, v in (metrics or {}).items() if isinstance(v, (int, float, str))})
+    if metrics and metrics.get("dir"):                   # P9.4.2: shrinkage fitted on the train rows (MED-34)
+        import polars as pl
+        from engine.value import shrinkage
+        is_train = pl.Series([s == "train" for s in split_fn(frame)], dtype=pl.Boolean)
+        fit = shrinkage.fit_from_models(frame.filter(is_train), h[is_train.to_numpy()], _q, _b, vocab)
+        p = shrinkage.save(fit, Path(metrics["dir"]) / shrinkage.FILE_NAME)
+        lg.info("shrinkage fitted", path=_rel(p), classes={v: len(fit.get(v, {})) for v in shrinkage.VALUES})
     return 0
 
 
 def cmd_build_neighbours(a, cfg, lg, run_id: str, timings: dict) -> int:
     """Adapter: `neighbours.build_index(h, side_table)` + `save_index`."""
     import polars as pl
+    if a.split_file is None:
+        raise CLIError("build-neighbours needs --split-file splits_v<N>.json: the panel must hold train matches "
+                       "only (R4, MED-38)")
     frame, h = _valued_frame(a.valued)
     if a.q_model is None:
         raise CLIError("needs --q-model (its descriptor vocab gives the desc_ids the regret uses)")

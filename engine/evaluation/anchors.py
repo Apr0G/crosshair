@@ -487,8 +487,11 @@ def player_rating_correlation(frame: pl.DataFrame, hltv_csv: Path | None,
             continue
         key = (r["match_key"].strip(), pid)
         if rating is not None and key in sums:
-            pairs.append({"match_key": key[0], "player": r.get("player_name") or str(r["steamid64"]),
-                          "sum_V": sums[key], "rating": rating})
+            name = (r.get("player_name") or "").strip().replace("|", "\\|")
+            if not name:
+                from engine.report.writer import player_label
+                name = player_label(pid)                 # never the raw SteamID64 (R14, MED-36)
+            pairs.append({"match_key": key[0], "player": name, "sum_V": sums[key], "rating": rating})
     if len(pairs) < 3:
         return _no_data(name, f"only {len(pairs)} player-maps matched the scored frame", band=f"rho >= {rho_min}")
     rho = spearman([p["sum_V"] for p in pairs], [p["rating"] for p in pairs])
@@ -584,7 +587,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--scored", type=Path, default=None, help="actions_scored parquet (test pro matches)")
     ap.add_argument("--actions", type=Path, default=None, help="matching P4 actions parquet")
     ap.add_argument("--states", type=Path, default=None, help="states parquet; a W column enables man advantage")
-    ap.add_argument("--hltv-csv", type=Path, default=paths.ROOT / "test" / "engine" / "fixtures" / "hltv_ratings.csv")
+    ap.add_argument("--hltv-csv", type=Path, default=paths.EVAL_DIR / "hltv_ratings.csv",
+                    help="hand-collected HLTV ratings (gitignored under data/engine/eval; the header-only "
+                         "template is test/engine/fixtures/hltv_ratings.csv) (MED-37)")
     ap.add_argument("--out", type=Path, default=None, help="report path (default data/engine/eval/anchors_<model>.md)")
     a = ap.parse_args(argv)
     if a.scored is None or not a.scored.is_file():

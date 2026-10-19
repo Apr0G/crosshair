@@ -154,14 +154,15 @@ for args, want in ((("train-q",), "--valued"),
                    (("build-neighbours", "--valued", str(nohpre)), "h_pre")):
     err = io.StringIO()
     with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-        rc = cli.main([*args, *LOGS])
+        rc = cli.main([*args, "--split-file", str(TMP / "splits_v1.json"), *LOGS])   # split required (MED-38)
     check(f"{' '.join(a for a in args if not a.startswith(str(TMP)))} -> exit 2 naming '{want}'",
           rc == 2 and want in err.getvalue() and "Traceback" not in err.getvalue(), err.getvalue()[-200:])
 withh = TMP / "valued_hpre.parquet"
 pl.DataFrame({"action_id": ["a"], "V": [0.1], "h_pre": [[0.1, 0.2]]}).write_parquet(withh)
 err = io.StringIO()
 with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-    rc = cli.main(["build-neighbours", "--valued", str(withh), "--q-model", str(TMP / "no_q"), *LOGS])
+    rc = cli.main(["build-neighbours", "--valued", str(withh), "--q-model", str(TMP / "no_q"),
+                   "--split-file", str(TMP / "splits_v1.json"), *LOGS])
 check("build-neighbours with a missing Q model dir -> exit 2", rc == 2 and "Q model directory not found" in err.getvalue())
 
 section("eval / sanity / review wiring")

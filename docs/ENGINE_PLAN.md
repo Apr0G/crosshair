@@ -1,6 +1,6 @@
 # Crosshair Engine v2 — Implementation Plan
 
-**Status:** plan, awaiting Faig's review. No code written, nothing committed.
+**Status:** executed through P12 on synthetic data (Amendment 1, 2026-10-19); re-aimed at FACEIT players and FACEIT/EFG as buyer by **Amendment 2 (2026-10-19 evening)** at the end of this file. Where a section below says "pro" as the baseline, Amendment 2 reads "baseline tier `faceit_10`".
 **Written:** 2026-10-19
 **Supersedes for the engine:** `src/score_impact.py`, `src/win_probability.py`, the
 `round_states` feature set in `src/state_sampler.py`, and the proposal in
@@ -40,12 +40,16 @@ in `CLAUDE.md`.
 
 ### 1.1 Goal
 
+*[Superseded by Amendment 2, section 1: the buyer is FACEIT/EFG and the users are FACEIT players; the engine is unchanged.]*
+
 Turn Crosshair into an engine that assigns every catalogued action in a CS2 demo a
 realized value, an expected value, a decision score, and an execution score, from a
 calibrated neural win-probability model, in under two minutes per map, at a quality that
 can be sold to HLTV, ESL FACEIT Group, Bayes Esports, or a tier-one organization.
 
 ### 1.2 Primary audience
+
+*[Superseded by Amendment 2, section 1.]*
 
 Professional analysts and the companies that serve them. Every number shown to them is
 computed and evaluated on professional demos. FACEIT data is used to train, never to
@@ -55,8 +59,8 @@ set the professional baseline (decided today).
 
 | # | Condition (Faig, 2026-10-19) | Acceptance test (must pass before v1 is "done") |
 |---|---|---|
-| C1 | No faulty result caused by two actions at the same tick. An action with zero effect must get exactly zero even if a teammate's −0.5 action lands on the same tick. | `test/engine/test_attribution_shapley.py::null_action_same_tick` builds the exact A/B scenario on the real model and asserts `V_A == 0 ± 1e-9` and `V_B == ΔW ± 1e-9`. Also: conservation per round `|Σ V − (W_end − W_start)| < 1e-6` on every round of the golden demo and on 1,000 sampled pro rounds. |
-| C2 | Every action is split into decision (good/bad) and execution (good/bad), with "what people usually do here". | For every valued action the report carries `V, Q, B, D, R, X`, the identity `V = B + D + X` holds to 1e-9, and a neighbour panel with ≥ 1 entry exists for ≥ 95% of pro actions (`test/engine/test_decision_split.py`). |
+| C1 | No faulty result caused by two actions at the same tick. An action with zero effect must get exactly zero even if a teammate's −0.5 action lands on the same tick. | `test/engine/test_attribution_shapley.py::null_action_same_tick` builds the exact A/B scenario and asserts `V_A == 0 ± 1e-9` and `V_B == ΔW ± 1e-9` with a stub `W`; on the real model (`--real`, P8.2.4) `|V_A| ≤ 0.002` and `|V_B − ΔW| ≤ 0.002` over 200 real kill windows (one bound per variant, decided 2026-10-19). Also: conservation per round `|Σ V − (W_end − W_start)| < 1e-6` on every round of the golden demo and on 1,000 sampled pro rounds. |
+| C2 | Every action is split into decision (good/bad) and execution (good/bad), with "what people usually do here". | For every valued action the report carries `V, Q, B, D, R, X`, the identity `V = B + D + X` holds to 1e-9 (a plumbing guard: `D = Q − B`, `X = V − Q`; the informative checks are `R ≤ 0`, Q tracking realized V and the panel coverage), and a neighbour panel with ≥ 1 entry exists for ≥ 95% of pro actions (`test/engine/test_decision_split.py`). |
 | C3 | Analysing one demo takes a reasonable time. | `bench/bench_analyze.py` on the golden demo: **target** ≤ 60 s wall-clock on the Windows PC with GPU, ≤ 180 s CPU-only, measured end to end including parsing. Hard ceiling 120 s GPU / 300 s CPU; above the ceiling v1 is not done. |
 
 ### 1.4 Non-goals for v1
@@ -83,7 +87,7 @@ set the professional baseline (decided today).
 | D4 | Enabler credit (flash, smoke, trade, HE, molotov) via the hazard heads, not fixed percentages. Trades included, clamped to a 5–40% band; total enabler share capped at 50%. | P6.2 heads, P8.5 clamps. |
 | D5 | Decision/execution split: `V = B + D + X`, regret `R` from actions seen ≥ `n_min` times in similar states only. Extrapolated alternatives shown only as a separately flagged suggestion, and not in v1. | P9. |
 | D6 | Sampling rate 2 Hz, as a single config value `sample_hz`. Boundary samples at every action tick ±1 regardless of rate. | P0.4, P3.1. 4 Hz is tested on a subset in P6.7. |
-| D7 | Train on pro + FACEIT level 10 with a coarse tier token; oversample pro; final pro-only fine-tune; evaluate and calibrate on pro only. Never feed per-player external ratings. | P1, P5.3, P6.3, P6.5. |
+| D7 | *[Replaced by Amendment 2, section 2.]* Train on pro + FACEIT level 10 with a coarse tier token; oversample pro; final pro-only fine-tune; evaluate and calibrate on pro only. Never feed per-player external ratings. | P1, P5.3, P6.3, P6.5. |
 | D8 | Counterfactual sanity suite is a hard gate before any attribution is trusted. | P7 is a gate for P8. |
 | D9 | CLI only for v1. | P10. |
 | D10 | Plan saved to `docs/ENGINE_PLAN.md`, uncommitted until asked. | This file. |
@@ -115,7 +119,7 @@ set the professional baseline (decided today).
 | A1 | AMD's native Windows PyTorch (ROCm 7.2.x, PyTorch 2.9, Python 3.12) works on the RX 9060 XT for training a ~3M-parameter transformer. | Fallback 1: WSL2 + Linux ROCm. Fallback 2: CPU training with smaller batches, overnight runs. P0.1 tests all three. |
 | A2 | demoparser2 / awpy 3 parse a pro demo in 10–15 s single-process on the 7800X3D. | If > 30 s, parse fewer props and compute derived values ourselves; P2.6 bench decides. |
 | A3 | awpy 3's `VisibilityChecker` answers a line-of-sight query in well under 100 µs. | If slower, precompute an area-to-area visibility table per map (P3.5 fallback). |
-| A4 | A few thousand pro maps since October 2023 are obtainable (HLTV downloads, the public Hugging Face archive). | If fewer, lean harder on FACEIT with the tier token and say so in the evaluation report. |
+| A4 | *[False, 2026-10-19; replaced by Amendment 2, section 3.]* A few thousand pro maps since October 2023 are obtainable (HLTV downloads, the public Hugging Face archive). | If fewer, lean harder on FACEIT with the tier token and say so in the evaluation report. |
 | A5 | 300–500 GB free on a fast drive for demos, parquet, and the DB. | Shard by map and process in waves; P0.3 checks free space. |
 | A6 | The win model, once it sees positions and pairwise sight, beats the LightGBM baseline on pro held-out log loss and Brier. Supported by Szmida & Toka (Sloan 2025): THGNN log loss 0.459 vs XGBoost 0.535 on 114 Inferno matches. | P6.7 is the decision point. If it does not beat the baseline, we stop and rethink features before touching attribution. |
 
@@ -403,6 +407,8 @@ dependency missing (Appendix E lists alternatives).
 
 ## P1 — Data acquisition
 
+*[P1.1 and P1.2 are replaced by Amendment 2, section 3. P1.3–P1.5 stand.]*
+
 Purpose: enough demos, labelled by tier, map, map version, and month, with frozen time
 splits, so that every later experiment uses the same data and nothing leaks across time.
 
@@ -471,8 +477,8 @@ splits, so that every later experiment uses the same data and nothing leaks acro
 ### P1.4 Quarantine and validation
 
 - **P1.4.1 Do:** every new demo gets a parse smoke test (P2.6 worker with
-  `--smoke`): header readable, tick rate 128 (else quarantine with reason), ≥ 16
-  rounds, both teams have 5 players, map in the known pool, duration plausible. Failures
+  `--smoke`): header readable, tick rate 128 (else quarantine with reason), ≥ 13
+  rounds (a completed MR12 map; 13-0 to 13-2 are legitimate, amended 2026-10-19), both teams have 5 players, map in the known pool, duration plausible. Failures
   move the file to `data/engine/demos/quarantine/<reason>/` and set
   `status = quarantined`. **Verify:** `test/engine/test_quarantine.py` with synthetic
   failure cases (truncated file, 64-tick header, 3 rounds).
@@ -1682,7 +1688,7 @@ bands, not targets to fit.
   shape, not the number).
 - **P11.1.5 Player-level correlation:** on test pro matches, Spearman between players'
   summed `V` per map and HLTV's published per-map rating for the same matches (manually
-  collected for ≥ 50 matches into `test/engine/fixtures/hltv_ratings.csv`) ≥ **0.6**
+  collected for ≥ 50 matches into `data/engine/eval/hltv_ratings.csv`, gitignored; the tracked fixture is a header-only template) ≥ **0.6**
   (informational: HLTV's rating is kill-centric; perfect agreement would mean we add
   nothing). The report lists the biggest disagreements for the review loop.
 - **P11.1.6 Do:** `engine eval --anchors` writes the report; thresholds in config are
@@ -2148,6 +2154,8 @@ rationale for the ones most likely to be questioned later:
 
 ## Appendix H — Open questions for Faig (answer at review, none block the plan)
 
+*[q1 answered 2026-10-19: no HLTV automation (Amendment 2, D18). q6 answered: Amendment 2, D21. The rest are open.]*
+
 1. **Data sources (P1.1.1):** are you comfortable with lightly automated HLTV demo
    downloads (rate-limited, browser-like), or should pro demos come only from the
    public archive and manual downloads?
@@ -2163,6 +2171,11 @@ rationale for the ones most likely to be questioned later:
    or collapse to `pro / faceit`?
 7. **Score in the context token (A.4):** I include match score and overtime. HLTV and
    Leetify exclude score. Keep (it is live information and affects play) or drop?
+8. **Shrink target for D̃ (B.8):** D = Q − B has a non-zero class mean (kills about
+   +0.07), so shrinking toward 0 would reward volume. **Decided 2026-10-19 (Faig):
+   shrink toward the class mean**; `engine/value/shrinkage.py` does so.
+9. **Round floor (P1.4.1):** "≥ 16 rounds" refused legitimate MR12 maps ending 13-0 to
+   13-2. **Decided 2026-10-19 (Faig): the floor is 13.**
 
 ---
 
@@ -2302,3 +2315,201 @@ validation, redaction, allowlist and API code are byte-for-byte otherwise.
 - Batch tensor dict keys exactly as P5.3.1.
 - Config keys exactly Appendix D; `engine/config.yaml` is created in P0 with every key
   and later phases only read it.
+
+---
+
+## Amendment 2 (2026-10-19, evening) — FACEIT-first: very good players, not pros
+
+Faig decided on 2026-10-19, after the data research in
+`reports/CS2 organizer demo packs.md` and `docs/DATA_SOURCES.md`, to re-aim the
+product: **sell it to FACEIT (ESL FACEIT Group) and let ordinary players use it on
+their own matches**, with "very good FACEIT players" as the reference population
+instead of professionals. This amendment overrides the matching parts of the plan
+above; everything not mentioned stands. Amendment 1 stands in full. No code was
+changed with this amendment; the code consequences are listed at the end as work
+items.
+
+### Why
+
+- HLTV.org's terms (section 2.2, confirmed by Faig in a browser) forbid data mining
+  and scraping, commercial exploitation of any content, and building a competing
+  product. Automated HLTV downloads are out; manual downloads cannot reach volume, and
+  the "commercially exploit" clause still hangs over a sold product trained on them.
+- No tournament organizer (ESL/EFG, BLAST, PGL, Valve, ~20 tier-two organizers)
+  publishes demo packs. Public archives hold ~2,450 pro maps, 2026 only; nothing
+  covers October 2023 to February 2026. No vendor sells `.dem` files. Assumption A4 is
+  false.
+- FACEIT is the one source where data, terms and buyer point the same way: a
+  documented Downloads API, demos of the players who would use the product, and a
+  company that already runs an in-house demo analyser and could buy a better one.
+
+### 1. Goal, audience, acceptance tests (replaces §1.1–1.3 where they say "pro")
+
+- **Goal (1.1):** the same engine (realized value, expected value, decision score,
+  execution score from a calibrated neural win model, under two minutes per map), at
+  a quality that can be sold to ESL FACEIT Group or offered directly to FACEIT players
+  as "analyse my match".
+- **Audience (1.2):** (a) FACEIT players who want to know which of their actions won
+  or lost rounds and what very good players do in the same spot; (b) FACEIT/EFG as a
+  buyer of the engine or its author. Every number shown is computed and evaluated on
+  the **baseline tier** (below). Professional demos are a transfer test, informational.
+- **Acceptance tests (1.3):** C1–C3 unchanged in substance; every "pro" in their
+  wording becomes "baseline tier": C1's conservation runs on every round of the golden
+  demo and on 1,000 sampled baseline-tier rounds; C2's neighbour-panel coverage is
+  ≥ 95% of baseline-tier actions; C3's golden demo is a baseline-tier demo.
+- **Non-goals (1.4):** unchanged for v1: CLI and report files only. A web upload page
+  or a FACEIT-integrated app is the obvious v2 for the "regular people" half of the
+  aim and is **not decided**; nothing in v1 may make it harder (reports stay
+  self-contained JSON + Markdown + PNG).
+
+### 2. Tiers (replaces D7 and glossary "Tier"; answers Appendix H q6)
+
+| token | definition | role |
+|---|---|---|
+| `faceit_10` | FACEIT match in which all ten players are level 10 (≥ 2,001 elo) | **baseline tier**: training, validation, test, calibration, neighbour panel, Q/B, anchors, review loop, golden demo |
+| `semi_pro` | FACEIT championship / hub rooms of organised competition: ESEA Advanced and Main, ESL Challenger League, ESL/IEM and EWC open qualifiers | training with its own token; reported separately in eval |
+| `pro` | tournament demos from the public archives (or hand-downloaded) | **transfer test only**: never trains the adopted model in v1, never sets the baseline |
+| `faceit_8_9` | FACEIT levels 8–9 | reserved; not collected in v1 (quota) |
+| `other` | anything else at inference | analysed with a report warning "tier below the trained tiers" |
+
+Per-match metadata records `elo_min` and `elo_avg` of the roster (additive columns,
+ask-before, see work items). An **elite** flag (`elo_min ≥ 3,000`, the elo band where
+professionals pug) is derived from them and reported, but is not a token in v1; "baseline
+= elite only" is an ablation in P6.7 (row (i)), adopted only if it beats `faceit_10` on
+the same test months by ≥ 0.003 log loss **and** keeps ECE ≤ 0.02 on the elite test
+rows.
+
+**D7 (replaced):** train on `faceit_10` + `semi_pro` with the tier token (and `pro` as
+an ablation row only); evaluate and calibrate on `faceit_10` test months; never feed
+per-player external ratings. Config keys `train.pro_oversample`, `train.pro_finetune_*`
+are read as applying to the **baseline tier**; the oversample default becomes 1 (the
+baseline is already the majority); the fine-tune stage stays, on `faceit_10` only.
+
+### 3. Data acquisition (replaces P1.1, P1.2, A4, R2)
+
+- **P1.1 (replaced): professional demos are optional and transfer-only.** Source: the
+  Hugging Face repos found on 2026-10-19 (`blanchon/opencs2_dataset_demo`, 1,988 maps,
+  128-tick by header on every row, 2026-03-23 to 2026-04-20; `cs2povarchive/cs2-demos`,
+  283 maps incl. 219 IEM Cologne Major 2026; `aldigobbler/cs2demos`, 177 maps), via the
+  existing `hf_archive.py` (listing, waves, sha256). Header-check tick rate before
+  ingest; keep HLTV match id and sha256 per file; ingest tier-one events first and stop
+  at about 300–400 tier-one maps unless disk and time are free. HLTV automation
+  (`hltv.py`) is **dormant**: not run, not extended, not deleted (deletion is
+  ask-before). Event-organizer dumps: closed, none exist. The HLTV licence letter is
+  **deferred**, not planned.
+- **P1.2 (replaced): FACEIT is the primary source.**
+  - **P1.2.0 Application.** Faig applies for the FACEIT Downloads API free tier
+    ("up to 1,500 requests or 200 GB per month") with the purpose stated plainly:
+    per-action impact analytics for FACEIT matches, demos stored locally for model
+    training, never redistributed. Faig reads the FACEIT Developer Terms and Platform
+    Terms in a browser before the first bulk run (no fetcher could read them) and
+    records the clauses on storage, ML training and commercial use in
+    `docs/DATA_SOURCES.md`. Keep the approval e-mail with the key.
+  - **P1.2.1 Discovery by player** (exists): high-elo players by region, their match
+    history, `--min-level 10` so all ten are level 10. Add `--min-elo 3000` runs for
+    the elite subset once the base is collected.
+  - **P1.2.2 Discovery by competition** (new, additive to `faceit_api.py`): organizer
+    search, then published championships, then `type=past` match pages, then the same
+    `demo_url` and the same Downloads exchange. Targets ESEA Advanced/Main, ESL
+    Challenger League, ESL/IEM and EWC open qualifiers; tier `semi_pro`. Every
+    endpoint and field is verified against one real response before use (rule: never
+    invent FACEIT fields). Unverified today: whether these seasons are exposed as
+    public championships and whether their `demo_url` is populated.
+  - **P1.2.3 Continuous collection.** FACEIT keeps demos about 30 days; there is no
+    back-catalogue. The collector runs at least weekly (`scrape --source api
+    --min-level 10 --max N`), sized to the monthly quota: with compressed FACEIT demos
+    the 200 GB cap is **estimated** at about 1,000 maps/month (measure in month one;
+    the 1,500-request cap binds first if the mean file is under about 135 MB). A quota
+    ledger (count and bytes per calendar month, additive table, ask-before) stops the
+    run at the cap; `engine inventory` prints month-to-date usage.
+  - **P1.2.4 Targets (replace P1.1.6 / P1.2.3 and `data.targets`):**
+    first training when `faceit_10` ≥ 1,500 maps with ≥ 150 per active-duty map and
+    ≥ 300 per month over the last three months; growth ≥ 800 maps/month; `semi_pro`
+    ≥ 300 maps before its token is trusted (else it is merged into `other` for that
+    training run and the report says so); `pro` ≥ 300 maps for the transfer test.
+    The 50,000-map FACEIT target is withdrawn (it needs the enterprise tier).
+    `inventory --assert-targets` reports shortfalls as before.
+- **P1.3–P1.5 unchanged** (inventory, quarantine at 128-tick, frozen month splits;
+  all tiers share the month boundaries).
+- **A4 (replaced):** "The FACEIT free Downloads tier is granted and yields ≥ 800
+  `faceit_10` maps/month." If refused: the Playwright path on the Mac for Faig's own
+  account (his own matches and friends', far lower volume) while the enterprise
+  conversation runs; if the quota is lower than estimated: train on what exists and
+  say so in the evaluation report.
+- **R2 (replaced):** "FACEIT key revoked or quota cut": likelihood medium, impact
+  high; mitigation: disclosed purpose on the application, provenance per demo, data
+  already on disk keeps its value, enterprise tier as the paid fallback.
+- **Provenance (new rule):** every demo row records `source`, `source_url` (redacted),
+  `downloaded_at` and `licence_basis` (`faceit_downloads_api`, `hf_<repo>`,
+  `manual`), so any block can be purged together with the models trained on it
+  (additive columns, ask-before).
+
+### 4. Model, gates and evaluation (word changes, same rules)
+
+- **P5.3 / P6.3.2:** tier sampling draws from `faceit_10` + `semi_pro`; `pro` shards
+  are built but excluded from training unless an ablation row asks for them.
+- **P6.5:** temperature on `faceit_10` val; reliability and ECE ≤ 0.02 on `faceit_10`
+  test; the same report is also produced on the `pro` transfer set, **informational**.
+- **P6.6, P7.2:** sanity and the counterfactual gate run on held-out `faceit_10`
+  rounds (thresholds unchanged).
+- **P6.7.1 ablation rows:** (a) LightGBM; (b) NN `faceit_10` only; (c) NN
+  `faceit_10` + `semi_pro` with tier token (default); (d)–(g) as before on (c);
+  **(h)** (c) + `pro` in training; **(i)** baseline = elite only. **P6.7.2** rules keep
+  their numbers with "pro test" read as "`faceit_10` test"; (h) is kept only if it
+  improves `faceit_10` test log loss by ≥ 0.003 **and** the pro transfer log loss (then
+  `pro` becomes a training tier by a note in `docs/ENGINE_MODELS.md`).
+- **P9.3:** the neighbour index and Q/B are built on `faceit_10` states (plus
+  `semi_pro` if adopted in training); the panel reads "what very good players do here".
+- **P11.1 anchors:** the published bands came from professional play; they stay as
+  informational bands with a note that pug numbers may sit outside them. **P11.1.5**
+  (HLTV rating correlation) is replaced by a correlation against the per-player match
+  stats FACEIT returns for the same match rooms (fields to be verified against a real
+  response; ≥ 50 test matches; Spearman ≥ 0.6 informational).
+- **P11.4 (new) Pro transfer report:** `engine eval --transfer` runs log loss, Brier,
+  ECE, the anchors and the conservation check on the `pro` test set; results are
+  reported, never gated; the report is part of the hand-off (it answers "does it hold
+  up on pro play?").
+- **P12.5 hand-off:** "five pro match reports" becomes five `faceit_10` match reports
+  plus one `semi_pro` and one `pro` report; add the data-provenance statement (sources,
+  terms read, dates) and the FACEIT Downloads approval.
+- **Golden demo (P0.7):** a `faceit_10` map from the first collected batch: full
+  match, ≥ 16 rounds, standard map, no forfeit, 128-tick. Pinned by sha256 as before.
+
+### 5. Decisions added (Appendix G)
+
+| ID | Decision | Consequence |
+|---|---|---|
+| D17 | Product aim: FACEIT/EFG as buyer, FACEIT players as users; baseline tier `faceit_10`. | This amendment. |
+| D18 | No automated access to hltv.org under its current terms; `hltv.py` dormant. | P1.1 replaced; Appendix H q1 answered "no". |
+| D19 | Professional demos are a transfer test, not training data, in v1. | P6.7 row (h) is the only way back in. |
+| D20 | Data provenance per demo is mandatory. | Additive schema change, ask-before. |
+| D21 | Tier buckets `faceit_10 / semi_pro / pro / faceit_8_9 / other`; elite is a flag, not a token. | Appendix H q6 answered. |
+
+### 6. Open questions for Faig (none block the data work)
+
+1. Elite threshold: `elo_min ≥ 3,000` as proposed, or `elo_avg`? (affects only a flag.)
+2. Should `semi_pro` rooms be collected from month one, or after the `faceit_10`
+   base reaches its target? (They compete for the same monthly quota.)
+3. v2 delivery for players: web upload, a FACEIT-integrated app, or a Discord bot?
+   Not needed now; it decides whether reports gain a machine-readable summary block.
+4. Playwright fallback on the Mac for your own account if the Downloads application
+   is refused: acceptable?
+
+### 7. Work items implied (not done; code is untouched by this amendment)
+
+- `engine/config.yaml` `data.targets`: replace with the P1.2.4 numbers; add
+  `data.tiers` thresholds and `data.quota` (requests, bytes per month).
+- `engine/sources/faceit_api.py`: additive discovery by competition (P1.2.2); elo
+  metadata per match; quota ledger hook.
+- `engine/db.py`: additive migration v2: `matches.elo_min`, `matches.elo_avg`,
+  `matches.licence_basis`, `matches.source_url`, `matches.downloaded_at`; a `quota`
+  table. **Ask-before, per the schema rule.**
+- `engine/state/schema.py` tier vocabulary and `engine/cli.py --tier` choices:
+  `semi_pro` added; `golden` kept.
+- `engine/evaluation/registry.py` / `docs/ENGINE_MODELS.md`: "test pro" wording to
+  "test `faceit_10`"; a `transfer` column for the pro numbers.
+- `engine/cli.py eval --transfer` (P11.4); `engine/evaluation/anchors.py` P11.1.5
+  replacement.
+- `test/engine/test_cli_guards.py`: the "FACEIT demo analysed with `--tier pro`"
+  warning stays; add the `other`-tier warning.
+- `docs/ENGINE_OPS.md`: weekly collector step and quota check in the checklist.
