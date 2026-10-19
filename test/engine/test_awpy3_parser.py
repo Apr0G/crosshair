@@ -347,6 +347,11 @@ def test_quarantine(tmp: Path) -> None:
         check(f"returns {reason}", ap.quarantine_check({**good, **patch}) == reason)
     check("unknown tick rate quarantined", ap.quarantine_check({**good, "tick_rate": None, "tick_rate_raw": None})
           == "tick_rate_not_128")
+    check("R8 (MED-04): a 0.0 raw rate is a value and fails; NaN / inf are unknown and fall back to the rounded rate",
+          ap.quarantine_check({**good, "tick_rate_raw": 0.0}) == "tick_rate_not_128"
+          and ap.quarantine_check({**good, "tick_rate_raw": float("nan")}) is None
+          and ap.quarantine_check({**good, "tick_rate_raw": float("inf")}) is None
+          and ap.quarantine_check({**good, "tick_rate": None, "tick_rate_raw": float("nan")}) == "tick_rate_not_128")
     header_only = {k: good[k] for k in ("map", "tick_rate", "tick_rate_raw", "duration_s")}
     check("header-only meta: absent keys not judged", ap.quarantine_check(header_only) is None)
 

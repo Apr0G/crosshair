@@ -45,7 +45,9 @@ check("message names 64 and 128-tick", "64" in p.stderr and "128-tick" in p.stde
 check("no traceback", "Traceback" not in p.stderr)
 check("nothing written for the refused demo", not (TMP / "o64" / "report.json").exists())
 for meta, ok in (({"tick_rate": 64}, False), ({"tick_rate": None}, False), ({"tick_rate": 128}, True),
-                 ({"tick_rate": 128, "tick_rate_raw": 127.8}, True), ({"tick_rate": 128, "tick_rate_raw": 64.0}, False)):
+                 ({"tick_rate": 128, "tick_rate_raw": 127.8}, True), ({"tick_rate": 128, "tick_rate_raw": 64.0}, False),
+                 ({"tick_rate": 128, "tick_rate_raw": float("nan")}, True), ({"tick_rate": 128, "tick_rate_raw": 0.0}, False),
+                 ({"tick_rate": 64, "tick_rate_raw": float("inf")}, False), ({"tick_rate": None, "tick_rate_raw": float("nan")}, False)):
     try:
         analyze.check_tick_rate(meta)
         got = True
@@ -103,10 +105,15 @@ def refused(fn) -> bool:
         return True
 
 
-check("missing model dir refused", refused(lambda: analyze.check_model(TMP / "wp_v9", doc=doc)))
-check("adopted model accepted", not refused(lambda: analyze.check_model(TMP / "wp_v3", doc=doc)))
-check("unadopted model refused", refused(lambda: analyze.check_model(TMP / "wp_v4", doc=doc)))
-check("--allow-unadopted accepts it", not refused(lambda: analyze.check_model(TMP / "wp_v4", True, doc=doc)))
+check("missing model dir refused", refused(lambda: analyze.check_model(TMP / "wp_v9", doc=doc, models_dir=TMP)))
+check("adopted model accepted", not refused(lambda: analyze.check_model(TMP / "wp_v3", doc=doc, models_dir=TMP)))
+check("unadopted model refused", refused(lambda: analyze.check_model(TMP / "wp_v4", doc=doc, models_dir=TMP)))
+check("--allow-unadopted accepts it", not refused(lambda: analyze.check_model(TMP / "wp_v4", True, doc=doc, models_dir=TMP)))
+(TMP / "elsewhere").mkdir()
+(TMP / "elsewhere" / "wp_v3").mkdir()
+check("adopted NAME in another location refused (MED-02)",
+      refused(lambda: analyze.check_model(TMP / "elsewhere" / "wp_v3", doc=doc, models_dir=TMP)))
+check("--allow-unadopted accepts the copy", not refused(lambda: analyze.check_model(TMP / "elsewhere" / "wp_v3", True, doc=doc, models_dir=TMP)))
 
 section("free space (P0.3.2)")
 demo_dir = TMP / "demos"

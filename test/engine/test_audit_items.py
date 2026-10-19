@@ -124,17 +124,17 @@ def high_03() -> None:
         (d / name).mkdir()
     dirs = (d / "q_v1", d / "neighbours_v1")
     try:
-        analyze.check_value_models(dirs, False, [], None, doc=doc)
+        analyze.check_value_models(dirs, False, [], None, doc=doc, models_dir=d)
         check("unadopted neighbours index refused", False)
     except analyze.ModelUnavailable as exc:
         check("unadopted neighbours index refused", "neighbours_v1" in str(exc) and "not adopted" in str(exc), str(exc))
     try:
-        analyze.check_value_models((d / "q_v1", d / "neighbours_v9"), True, [], None, doc=doc)
+        analyze.check_value_models((d / "q_v1", d / "neighbours_v9"), True, [], None, doc=doc, models_dir=d)
         check("missing value directory refused even with --allow-unadopted", False)
     except analyze.ModelUnavailable as exc:
         check("missing value directory refused even with --allow-unadopted", "neighbours_v9" in str(exc), str(exc))
     warnings: list = []
-    analyze.check_value_models(dirs, True, warnings, None, doc=doc)
+    analyze.check_value_models(dirs, True, warnings, None, doc=doc, models_dir=d)
     check("--allow-unadopted: passes with one model_unadopted warning per unadopted value model",
           [w["code"] for w in warnings] == ["model_unadopted"] and "neighbours_v1" in warnings[0]["message"], str(warnings))
     src = (ROOT / "engine" / "analyze.py").read_text(encoding="utf-8") + (ROOT / "engine" / "cli.py").read_text(encoding="utf-8")
@@ -250,9 +250,55 @@ def high_06() -> None:
           gone.pair[i, j, SMOKE] == 0.0 and not (np.nanmax(gone.pair[:, :, SMOKE]) > 0.0))
 
 
+def med_02() -> None:
+    """2026-10-19 MED-02: an adopted model NAME was accepted from any directory."""
+    from engine import analyze
+    d = TMP / "m02"; (d / "models" / "wp_v3").mkdir(parents=True); (d / "copy" / "wp_v3").mkdir(parents=True)
+    doc = _models_doc(d / "ENGINE_MODELS.md", "| 2026-11-01 | wp_v3 | wp | 0.4600 | 0.1500 | 0.0120 | 0.4900 | – | ok | adopted |\n")
+    analyze.check_model(d / "models" / "wp_v3", doc=doc, models_dir=d / "models")
+    try:
+        analyze.check_model(d / "copy" / "wp_v3", doc=doc, models_dir=d / "models")
+        check("same-named directory outside models/ refused", False)
+    except analyze.ModelUnavailable as exc:
+        check("same-named directory outside models/ refused", "not the adopted one" in str(exc), str(exc))
+
+
+def med_04() -> None:
+    """2026-10-19 MED-04: `or` as a numeric null-coalesce on the tick-rate gates."""
+    from engine import analyze
+    from engine.parse import awpy3_parser as ap
+    def refused(m):
+        try:
+            analyze.check_tick_rate(m)
+            return False
+        except analyze.Refused:
+            return True
+    zero, nan = {"tick_rate": 128, "tick_rate_raw": 0.0}, {"tick_rate": None, "tick_rate_raw": float("nan")}
+    check("check_tick_rate: a 0.0 raw rate is a value (refused), not a missing one that falls through",
+          refused(zero) and ap.quarantine_check(zero) == "tick_rate_not_128")
+    check("check_tick_rate: NaN raw with no rounded rate is unknown (refused), with 128 it falls back (ok)",
+          refused(nan) and not refused({"tick_rate": 128, "tick_rate_raw": float("nan")}))
+    check("a finite raw rate still wins over the rounded one",
+          ap.quarantine_check({"tick_rate": 128, "tick_rate_raw": 127.9}) is None)
+
+
+def med_06() -> None:
+    """2026-10-19 MED-06: re-registering an existing match_id with a different demo
+    reported success and left a copy the DB did not describe."""
+    from engine import db
+    db.register_match({"match_key": "m06", "demo_sha256": "1" * 64, "tier": "pro"})
+    try:
+        db.register_match({"match_key": "m06", "demo_sha256": "2" * 64, "tier": "pro"})
+        check("register_match raises MatchConflict", False)
+    except db.MatchConflict:
+        check("register_match raises MatchConflict", db.get_match("m06")["demo_sha256"] == "1" * 64)
+    check("same sha under the same key is still idempotent",
+          db.register_match({"match_key": "m06", "demo_sha256": "1" * 64}) == "m06")
+
+
 # ── runner ────────────────────────────────────────────────────────────────────
 
-ITEMS = [crit_01, high_01, high_02, high_03, high_04, high_05, high_06]
+ITEMS = [crit_01, high_01, high_02, high_03, high_04, high_05, high_06, med_02, med_04, med_06]
 
 section("audit items (docs/reviews)")
 for fn in ITEMS:

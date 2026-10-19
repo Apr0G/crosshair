@@ -20,6 +20,7 @@ attributes `header`, `rounds`, `kills`, `damages`, `bomb`, `grenades`, `fires`,
 `snapshots(start_tick=, end_tick=)` method.
 """
 import hashlib
+import math
 import statistics
 from pathlib import Path
 
@@ -296,6 +297,21 @@ def header_info(path, *, demo=None, with_roster: bool = False) -> dict:
     return info
 
 
+def _first_finite(*vals):
+    """First value that is a finite number (not None / NaN / inf), else None. The R8
+    rule: `or` is not a null-coalesce over numerics (0.0 is falsy, NaN is truthy)."""
+    for v in vals:
+        if v is None or isinstance(v, bool):
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f):
+            return f
+    return None
+
+
 def quarantine_check(meta: dict, known_maps=None) -> str | None:
     """First failing P1.4.1 rule as a reason string, or None when the demo passes.
     Keys absent from `meta` are not judged (a header-only dict has no n_rounds), but a
@@ -304,8 +320,8 @@ def quarantine_check(meta: dict, known_maps=None) -> str | None:
         from engine.maps.assets import ACTIVE_POOL
         known_maps = ACTIVE_POOL
     if "tick_rate" in meta:
-        rate = meta.get("tick_rate_raw") or meta.get("tick_rate")
-        if rate is None or abs(float(rate) - EXPECTED_TICK_RATE) > TICK_RATE_TOL:
+        rate = _first_finite(meta.get("tick_rate_raw"), meta.get("tick_rate"))
+        if rate is None or abs(rate - EXPECTED_TICK_RATE) > TICK_RATE_TOL:
             return "tick_rate_not_128"
     if "n_rounds" in meta and (meta["n_rounds"] is None or meta["n_rounds"] < MIN_ROUNDS):
         return "too_few_rounds"

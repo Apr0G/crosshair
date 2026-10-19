@@ -216,8 +216,11 @@ class AnalyzeResult:
 # ── guards (P1.4.1, P11.3, P12.1) ─────────────────────────────────────────────
 
 def check_tick_rate(meta: dict) -> None:
-    """Refuse anything that is not a 128-tick demo (P1.4.1 rule `tick_rate_not_128`)."""
-    rate = meta.get("tick_rate_raw") or meta.get("tick_rate")
+    """Refuse anything that is not a 128-tick demo (P1.4.1 rule `tick_rate_not_128`).
+    `tick_rate_raw` is preferred over the rounded `tick_rate`; a None / NaN / inf
+    value is unknown and refused (R8: no `or` over numerics; MED-04, 2026-10-19)."""
+    from engine.parse.awpy3_parser import _first_finite
+    rate = _first_finite(meta.get("tick_rate_raw"), meta.get("tick_rate"))
     if rate is None or abs(float(rate) - EXPECTED_TICKRATE) > TICKRATE_TOL:
         shown = "unknown" if rate is None else f"{float(rate):g}"
         raise Refused(f"refused: demo tick rate is {shown}, the engine analyses only {EXPECTED_TICKRATE}-tick "
@@ -295,25 +298,34 @@ def resolve_model_dir(model: str | None, model_dir: str | Path | None) -> Path:
 
 
 def check_model(model_dir: Path, allow_unadopted: bool = False, doc: Path | None = None,
-                hint: str = "train one with `train-wp`") -> None:
+                hint: str = "train one with `train-wp`", models_dir: Path | None = None) -> None:
+    """The adoption gate (P12.1). An adopted name counts only for the directory the
+    registry adopted, `<models_dir>/<name>`; a same-named folder elsewhere needs
+    `--allow-unadopted` (MED-02, 2026-10-19)."""
     model_dir = Path(model_dir)
     if not model_dir.is_dir():
         raise ModelUnavailable(f"model directory not found: {model_dir.name} ({hint})")
-    if not allow_unadopted and model_dir.name not in adopted_models(doc):
+    if allow_unadopted:
+        return
+    if model_dir.name not in adopted_models(doc):
         raise ModelUnavailable(f"model {model_dir.name} is not adopted in docs/ENGINE_MODELS.md; "
                                f"pass --allow-unadopted to use it anyway")
+    home = Path(models_dir) if models_dir is not None else paths.MODELS_DIR
+    if model_dir.resolve() != (home / model_dir.name).resolve():
+        raise ModelUnavailable(f"model {model_dir.name} is adopted, but this directory is not the adopted one "
+                               f"under {home.name}/; pass --allow-unadopted to analyse a copy")
 
 
 VALUE_HINTS = ("train one with `train-q`", "build one with `build-neighbours`")
 
 
 def check_value_models(value_dirs: tuple, allow_unadopted: bool, warnings: list, logger=None,
-                       doc: Path | None = None) -> None:
+                       doc: Path | None = None, models_dir: Path | None = None) -> None:
     """The adoption gate for the value stage (P12.1 applies to every model a report
     uses): `--q-model` and `--neighbours` directories must exist and be adopted, or
     `allow_unadopted` is set and each unadopted one is a `model_unadopted` warning."""
     for d, hint in zip(value_dirs, VALUE_HINTS):
-        check_model(d, allow_unadopted, doc, hint)
+        check_model(d, allow_unadopted, doc, hint, models_dir)
         if allow_unadopted and Path(d).name not in adopted_models(doc):
             _warn(warnings, "model_unadopted", f"model {Path(d).name} is not adopted (--allow-unadopted)", logger)
 
@@ -797,10 +809,10 @@ def analyze_tables(raw, *, match_key: str, tier: str, geometry, predictor, cfg=N
 def analyze_demo(path, *, tier: str, out_dir, model_dir=None, device: str | None = None, cfg=None,
                  allow_unadopted: bool = False, show_ids: bool = False, predictor=None,
                  value_dirs: tuple | None = None, write_db: bool = True, run_id: str | None = None,
-                 logger=None) -> AnalyzeResult:
+                 logger=None, warnings: list | None = None) -> AnalyzeResult:
     """Quarantine check -> parse -> RawTables -> map geometry -> Predictor -> analyze_tables.
     `predictor` (tests) replaces loading one from `model_dir`; `value_dirs` = (q_dir,
-    neighbours_dir) enables the value stage."""
+    neighbours_dir) enables the value stage; `warnings` seeds the report's warning list."""
     from engine.maps import assets as map_assets
     from engine.maps import callouts as map_callouts
     from engine.maps import version as map_version_mod
@@ -815,7 +827,7 @@ def analyze_demo(path, *, tier: str, out_dir, model_dir=None, device: str | None
     if tier not in TIERS:
         raise ValueError(f"tier must be one of {TIERS}, got {tier!r}")
     timings: dict = {}
-    warnings: list = []
+    warnings = list(warnings or [])
 
     # ── quarantine before the expensive parse (P1.4.1) ──
     with timed("parse", timings):

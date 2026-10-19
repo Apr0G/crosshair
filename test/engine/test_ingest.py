@@ -115,6 +115,16 @@ def test_register_demo() -> None:
         check("an existing different file is never overwritten",
               (paths.DEMOS_PRO_DIR / "1-clash.dem").read_bytes() == b"different content" * 100)
 
+    moved = TMP / "in" / "moved.dem"
+    moved.write_bytes(demo_bytes("moved"))
+    (paths.DEMOS_PRO_DIR / "1-local.dem").unlink(missing_ok=True)          # the original file is gone
+    try:
+        _quiet(ingest.register_demo, "1-local", moved, tier="pro", source="x", header_reader=fake_header)
+        check("existing key + different demo -> MatchConflict, no orphan copy (MED-06)", False, "no exception")
+    except db.MatchConflict:
+        check("existing key + different demo -> MatchConflict, no orphan copy (MED-06)",
+              not (paths.DEMOS_PRO_DIR / "1-local.dem").exists() and db.get_match("1-local")["tier"] == "faceit_10")
+
     same = TMP / "in" / "same.dem"
     same.write_bytes(demo_bytes("same"))
     (paths.DEMOS_PRO_DIR / "1-same.dem").write_bytes(same.read_bytes())

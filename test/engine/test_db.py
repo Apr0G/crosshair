@@ -68,6 +68,12 @@ def test_register() -> None:
     con.close()
     check("idempotent: same key again", db.register_match(meta, url) == "1-abc"
           and db.stats()["matches"] == 1 and db.stats()["processed"] == 1)
+    try:
+        db.register_match({**meta, "demo_sha256": "f" * 64, "tier": "pro"})
+        check("same key, different demo -> MatchConflict (MED-06)", False, "no exception")
+    except db.MatchConflict:
+        check("same key, different demo -> MatchConflict (MED-06)",
+              db.get_match("1-abc")["demo_sha256"] == "a" * 64 and db.get_match("1-abc")["tier"] == "faceit_10")
 
     dup = {**meta, "match_key": "hltv-other", "source": "hltv"}
     key = db.register_match(dup)

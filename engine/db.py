@@ -322,15 +322,21 @@ def _check_status(status: str) -> None:
         raise ValueError(f"unknown status {status!r}; expected one of {STATUSES}")
 
 
+class MatchConflict(ValueError):
+    """`register_match`: the match_key exists and describes a different demo file."""
+
+
 def register_match(meta: dict, demo_url: str | None = None) -> str:
     """Insert one `matches` row and its `processed` row in ONE transaction; return the
     match_key that holds this demo.
 
-    Idempotent: an existing `match_key` returns that key unchanged. A demo whose
-    `demo_sha256` is already stored under another key is the same match (P1.1.5): the
-    earlier row is kept, the duplicate is logged, the new id is marked processed (so its
-    source does not download it again) and the EXISTING key is returned.
-    `demo_url` is redacted before it is written."""
+    Idempotent: an existing `match_key` with the same (or no) `demo_sha256` returns that
+    key unchanged. An existing key with a DIFFERENT sha256 raises `MatchConflict`
+    (MED-06, 2026-10-19): the row describes another file, so nothing is written and the
+    caller must not keep its copy. A demo whose `demo_sha256` is already stored under
+    another key is the same match (P1.1.5): the earlier row is kept, the duplicate is
+    logged, the new id is marked processed (so its source does not download it again)
+    and the EXISTING key is returned. `demo_url` is redacted before it is written."""
     unknown = set(meta) - set(MATCH_COLUMNS)
     if unknown:
         raise ValueError(f"unknown matches columns: {sorted(unknown)}")
@@ -359,7 +365,8 @@ def register_match(meta: dict, demo_url: str | None = None) -> str:
 
         if existing is not None:
             if row["demo_sha256"] and existing[0] and existing[0] != row["demo_sha256"]:
-                print(f"[db] {key}: already registered with a different sha256; keeping the earlier row")
+                raise MatchConflict(f"{key} is already registered with a different demo (sha256 differs); "
+                                    f"the earlier row is kept, this file is not registered")
             result = key
         elif owner is not None:
             print(f"[db] duplicate demo: {key} has the same sha256 as {owner}; keeping {owner}")

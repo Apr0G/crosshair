@@ -439,7 +439,12 @@ def load(path: Path | str | None = None) -> Config:
     """Load, type-check and validate the YAML at `path` (default DEFAULT_PATH)."""
     p = Path(path) if path is not None else DEFAULT_PATH
     with open(p, encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
+        try:
+            data = yaml.safe_load(fh)
+        except yaml.YAMLError as exc:                 # a tab indent, an unclosed bracket: exit 2, not 1
+            mark = getattr(exc, "problem_mark", None)
+            where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+            raise ConfigError(f"{p.name}: YAML syntax error{where}: {getattr(exc, 'problem', None) or exc}") from None
     return from_dict(data)
 
 

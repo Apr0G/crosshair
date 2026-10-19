@@ -241,12 +241,31 @@ def _model_arg(model: str | None) -> str | None:
 
 # ── commands ──────────────────────────────────────────────────────────────────
 
+def _test_hook_guard(a, lg, write_db: bool) -> tuple[bool, list[dict]]:
+    """MED-03 (2026-10-19): a test hook (CROSSHAIR_STUB_PREDICTOR, --raw-tables-story) may
+    never write under the production report dir or into the production engine.db.
+    Returns (write_db, warnings): `--out` is required; `action_scores` are written only
+    when CROSSHAIR_ENGINE_DB points the DB elsewhere; the report carries a `test_hook`
+    warning so stub / synthetic numbers are never mistaken for real ones."""
+    from engine import db
+    if a.out is None:
+        raise CLIError("TEST HOOK active: pass --out; a stub or synthetic analysis never writes under "
+                       "data/engine/reports")
+    warnings = [{"code": "test_hook", "message": "stub predictor and/or synthetic tables: numbers are not "
+                                                 "from a model on this demo"}]
+    if write_db and os.environ.get(db.ENV_DB) is None:
+        lg.warning("TEST HOOK: CROSSHAIR_ENGINE_DB is not set; action_scores are NOT written to the production DB")
+        write_db = False
+    return write_db, warnings
+
+
 def cmd_analyze(a, cfg, lg, run_id: str, timings: dict) -> int:
     from engine import analyze
     from engine.config import config_hash
     stub = analyze.stub_enabled()
     if (a.q_model is None) != (a.neighbours is None):
         raise CLIError("the value stage needs both --q-model and --neighbours")
+    hook, write_db, hook_warnings = stub or bool(a.raw_tables_story), not a.no_db, []
     value_dirs = None
     if a.q_model:
         value_dirs = (paths.MODELS_DIR / a.q_model, paths.MODELS_DIR / a.neighbours)
@@ -275,20 +294,26 @@ def cmd_analyze(a, cfg, lg, run_id: str, timings: dict) -> int:
         if value_dirs:
             analyze.check_value_models(value_dirs, a.allow_unadopted, warnings, lg)
             vm = analyze.ValueModels.load(*value_dirs, device or "cpu")
+        if hook:                                   # after the model gates, before anything is written
+            write_db, hook_warnings = _test_hook_guard(a, lg, write_db)
+            warnings = hook_warnings + warnings
         res = analyze.analyze_tables(raw, match_key=key, tier=a.tier, geometry=geo, predictor=predictor, cfg=cfg,
                                      value_models=vm, out_dir=a.out or paths.REPORTS_DIR / key, run_id=run_id,
                                      show_ids=a.show_ids, model_versions=model_versions, warnings=warnings,
-                                     write_db=not a.no_db, source_tier_=analyze.source_tier(raw.meta), logger=lg)
+                                     write_db=write_db, source_tier_=analyze.source_tier(raw.meta), logger=lg)
     else:
         if not a.demo.is_file():
             raise CLIError(f"demo not found: {a.demo.name}")
         model_dir = None
         if predictor is None:
             model_dir = analyze.resolve_model_dir(a.model, a.model_dir)
+        if hook:
+            write_db, hook_warnings = _test_hook_guard(a, lg, write_db)
         res = analyze.analyze_demo(a.demo, tier=a.tier, out_dir=a.out or paths.REPORTS_DIR / a.demo.stem,
                                    model_dir=model_dir, device=device, cfg=cfg,
                                    allow_unadopted=a.allow_unadopted, show_ids=a.show_ids, predictor=predictor,
-                                   value_dirs=value_dirs, write_db=not a.no_db, run_id=run_id, logger=lg)
+                                   value_dirs=value_dirs, write_db=write_db, run_id=run_id, logger=lg,
+                                   warnings=hook_warnings)
     timings.update(res.timings)
     dev = getattr(predictor, "device", None) or ("stub" if stub else device or "auto")
     resid = max((abs(r["conservation_residual"]) for r in res.report["rounds"]), default=0.0)
@@ -632,6 +657,8 @@ def _load_dotenv(path: Path) -> None:
 def cmd_scrape(a, cfg, lg, run_id: str, timings: dict) -> int:
     from engine import ingest
     _load_dotenv(paths.ROOT / ".env")
+    if not os.environ.get("FACEIT_API_KEY", "").strip():
+        raise CLIError("FACEIT_API_KEY is not set (put it in .env, see .env.example); scrape needs it", 2)
     kw = {k: v for k, v in (("min_level", a.min_level), ("min_elo", a.min_elo), ("region", a.region))
           if v is not None}
     t0 = time.perf_counter()
@@ -641,10 +668,13 @@ def cmd_scrape(a, cfg, lg, run_id: str, timings: dict) -> int:
 
 
 def cmd_ingest(a, cfg, lg, run_id: str, timings: dict) -> int:
-    from engine import ingest
+    from engine import db, ingest
     if not a.demo.is_file():
         raise CLIError(f"demo not found: {a.demo.name}")
-    key = ingest.register_demo(a.match_id or a.demo.stem, a.demo, tier=a.tier, source=a.source)
+    try:
+        key = ingest.register_demo(a.match_id or a.demo.stem, a.demo, tier=a.tier, source=a.source)
+    except db.MatchConflict as exc:
+        raise CLIError(f"refused: {exc}", 2) from None
     say(f"registered as {key}")
     return 0
 

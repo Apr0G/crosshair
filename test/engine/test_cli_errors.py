@@ -9,6 +9,7 @@ delegate (missing module, no main, NotImplementedError) -> 2; an unexpected exce
 """
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -66,6 +67,32 @@ p = run("analyze", "syn.dem", "--raw-tables-story", "base", "--model-dir", str(T
 check("unadopted model -> exit 2", p.returncode == 2 and "not adopted" in p.stderr, p.stderr[-300:])
 p = run("analyze", "syn.dem", "--raw-tables-story", "base", "--q-model", "q_v1", *LOGS)
 check("--q-model without --neighbours -> exit 2", p.returncode == 2 and "--neighbours" in p.stderr)
+
+section("test hooks never touch production locations (MED-03)")
+HOOK_ENV = {**ENV, "CROSSHAIR_STUB_PREDICTOR": "1"}
+p = subprocess.run([sys.executable, "-m", "engine.cli", "analyze", "syn.dem", "--raw-tables-story", "base", *LOGS],
+                   cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", env=HOOK_ENV)
+check("hook without --out -> exit 2, says --out", p.returncode == 2 and "--out" in p.stderr and no_tb(p), p.stderr[-300:])
+NO_DB_ENV = {k: v for k, v in HOOK_ENV.items() if k != "CROSSHAIR_ENGINE_DB"}
+p = subprocess.run([sys.executable, "-m", "engine.cli", "analyze", "syn.dem", "--raw-tables-story", "base",
+                    "--out", str(TMP / "hook_out"), *LOGS],
+                   cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", env=NO_DB_ENV)
+rep = json.loads((TMP / "hook_out" / "report.json").read_text(encoding="utf-8")) if (TMP / "hook_out" / "report.json").is_file() else {}
+check("hook with the production DB: runs, warns, writes no action_scores",
+      p.returncode == 0 and "NOT written" in p.stderr and "db_rows=0" in p.stderr, p.stderr[-300:])
+check("report carries the test_hook warning", any(w["code"] == "test_hook" for w in rep.get("warnings", [])))
+
+section("configuration errors exit 2 (MED-05)")
+broken = TMP / "broken.yaml"
+broken.write_text("sampling:\n  hz: [1, 2\n", encoding="utf-8")
+p = run("status", "--config", str(broken), *LOGS)
+check("YAML syntax error -> exit 2 with line and column", p.returncode == 2 and "YAML syntax error" in p.stderr
+      and "line" in p.stderr and no_tb(p), p.stderr[-300:])
+NOKEY_ENV = {**ENV, "FACEIT_API_KEY": ""}
+p = subprocess.run([sys.executable, "-m", "engine.cli", "scrape", "--source", "api", "--max", "1", *LOGS],
+                   cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", env=NOKEY_ENV)
+check("scrape without FACEIT_API_KEY -> exit 2 before any request", p.returncode == 2 and "FACEIT_API_KEY" in p.stderr
+      and no_tb(p), p.stderr[-300:])
 
 section("unfinished delegates")
 p = run("eval", "--attribution", *LOGS)
