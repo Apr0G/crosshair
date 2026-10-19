@@ -13,10 +13,10 @@ makes a model adopted.
 Adoption table columns (ADOPTION_HEADER): date, model, kind, log loss, Brier, ECE,
 baseline log loss, hazard AUC, decision rule satisfied, status. Status is one of
 STATUSES; to retire a model, edit the status cell of its row in place (never add a
-second row for the same model). `engine.analyze.adopted_models` reads the same file
-more loosely (every `<kind>_v<N>` token on a line without reject / retire / supersede /
-revoke), so this module refuses rule text with those words and the doc names model
-versions only in table rows; both readers then agree.
+second row for the same model). `engine.analyze.adopted_models` reads the same table
+through `adoption_rows` (model cell + status cell), so the two readers cannot
+disagree. `adopt` still refuses rule text that names another model version or carries
+a status word, so a row reads unambiguously to a human too (2026-10-19 audit, HIGH-02).
 
 P6.7.2 is enforced for `wp` models: log loss at least LOGLOSS_MARGIN (0.01) below the
 LightGBM baseline and ECE at most `calib.ece_target` (0.02). Other kinds record their
@@ -41,7 +41,8 @@ STATUSES        = ("adopted", "retired", "superseded", "revoked", "rejected")
 LOGLOSS_MARGIN  = 0.01            # P6.7.2: beat the baseline by >= 0.01 log loss
 ECE_MAX         = 0.02            # P6.7.2 / calib.ece_target when no config is given
 NAME_RE         = re.compile(r"^[a-z]+_v\d+$")
-_NOT_ADOPTED_RE = re.compile(r"reject|retire|supersede|revoke", re.IGNORECASE)   # as engine.analyze
+TOKEN_RE        = re.compile(r"\b[a-z]+_v\d+\b")
+_NOT_ADOPTED_RE = re.compile(r"reject|retire|supersede|revoke", re.IGNORECASE)
 NUMBER_KEYS     = ("logloss", "brier", "ece", "baseline_logloss", "hazard_auc")
 
 
@@ -138,7 +139,11 @@ def adopt(name: str, numbers: dict, rule: str, *, doc: Path | None = None, when:
         raise ValueError("rule must be one non-empty line without '|'")
     if _NOT_ADOPTED_RE.search(rule):
         raise ValueError("rule text must not contain reject / retire / supersede / revoke "
-                         "(engine.analyze would read the row as not adopted)")
+                         "(status words belong in the status cell)")
+    others = sorted(set(TOKEN_RE.findall(rule)) - {name})
+    if others:
+        raise ValueError(f"rule text must not name another model version {others}; "
+                         f"only the model cell says which model a row adopts")
     if any(r["model"] == name for r in adoption_rows(doc)):
         raise ValueError(f"{name} already has a row; change its status in place instead")
     ece_max = float(cfg.calib.ece_target) if cfg is not None else ECE_MAX

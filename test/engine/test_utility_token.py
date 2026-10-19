@@ -96,6 +96,17 @@ for tr in (64, 128):
     check("smoke + fire + decoy active together", kinds == ["decoy", "fire", "smoke"], str(kinds))
     fz = next(u for u in ut if u.kind == "fire")
     check("fire radius from extent, time_left 7 - 1", fz.radius_units == 150.0 and close(fz.time_left_s, 6.0))
+    check("inside_flag: 1 inside the known fire, 0 outside it, 0 with no fire",
+          utility.inside_flag(ut, "fire", 3000.0, 300.0, 0.0) == 1
+          and utility.inside_flag(ut, "fire", 0.0, 0.0, 0.0) == 0
+          and utility.inside_flag([u for u in ut if u.kind != "fire"], "fire", 3000.0, 300.0, 0.0) == 0)
+    nof = with_rows(raw, "infernos", [dict(entity_id=951, start_tick=T(2200), end_tick=T(2200) + 7 * tr,
+                                           x=3000.0, y=300.0, z=0.0, extent_radius=None, thrower_steamid=A_ID)])
+    un, _, _ = utility.tokens(RoundView.build(nof, 1).until(T(2200) + tr))
+    check("inside_flag: None (not 0) while a fire of unknown extent burns (HIGH-04)",
+          utility.inside_flag(un, "fire", 3000.0, 300.0, 0.0) is None
+          and utility.inside_flag(un, "fire", 0.0, 0.0, 0.0) is None
+          and utility.inside_flag(un, "smoke", 0.0, 0.0, 0.0) in (0, 1))
     dz = next(u for u in ut if u.kind == "decoy")
     check("decoy: radius None, owner t, time_left 15 - elapsed",
           dz.radius_units is None and dz.owner_side == "t" and close(dz.time_left_s, 15.0 - (T(2200) + tr - T(1200)) / tr))

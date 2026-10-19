@@ -51,6 +51,7 @@ from typing import Callable
 import numpy as np
 
 from engine.actions.types import Action
+from engine.state.pairwise import eye_point
 from engine.state.schema import (DEAD_NULL_FIELDS, DEAD_ZERO_FIELDS, MAX_UTILITY, N_PLAYERS,
                                  PAIR_CHANNELS, PlayerToken, Snapshot, UtilityToken)
 
@@ -138,6 +139,15 @@ def _same_pos(a: PlayerToken, b: PlayerToken) -> bool:
     return pa is not None and pa == pb
 
 
+def _eye(p: PlayerToken) -> tuple[float, float, float] | None:
+    """The builder's eye point (pairwise.eye_point); None for an unknown position."""
+    return None if _pos(p) is None else eye_point(p)
+
+
+def _same_eye(a: PlayerToken, b: PlayerToken) -> bool:
+    return _same_pos(a, b) and a.is_ducking == b.is_ducking
+
+
 def _in_token(u: UtilityToken, pos) -> bool:
     """Mirrors engine.state.utility.inside: smoke = 3D sphere, fire = 2D disc with
     FIRE_Z_TOL vertical slack, decoy / unknown radius = never."""
@@ -201,13 +211,13 @@ def _los_value(state: Snapshot, i: int, j: int, ref: Snapshot | None, geometry) 
         return np.nan
     ra, rb = _ref_player(ref, a.player_id), _ref_player(ref, b.player_id)
     if (ra is not None and rb is not None and ra.alive == 1 and rb.alive == 1
-            and _same_pos(a, ra) and _same_pos(b, rb)):
+            and _same_eye(a, ra) and _same_eye(b, rb)):
         v = ref.pair[ref.index_of(a.player_id), ref.index_of(b.player_id), LOS]
         if not np.isnan(v):
             return float(v)
-    pa, pb = _pos(a), _pos(b)
-    if geometry is not None and pa is not None and pb is not None:
-        vis = geometry.is_visible(pa, pb)
+    ea, eb = _eye(a), _eye(b)
+    if geometry is not None and ea is not None and eb is not None:
+        vis = geometry.is_visible(ea, eb)        # eye to eye, as pairwise.table
         return np.nan if vis is None else float(bool(vis))
     return np.nan
 
@@ -225,10 +235,15 @@ def _nav_value(state: Snapshot, i: int, j: int, ref: Snapshot | None, geometry) 
 
 
 def _smoke_value(state: Snapshot, i: int, j: int) -> float:
-    pa, pb = _pos(state.players[i]), _pos(state.players[j])
-    if pa is None or pb is None:
+    """As pairwise.table: eye-to-eye segment against every smoke sphere; NaN unless both
+    players are alive with a known position."""
+    a, b = state.players[i], state.players[j]
+    if a.alive != 1 or b.alive != 1:
         return np.nan
-    return float(any(_smoke_blocks(u, pa, pb) for u in state.utility))
+    ea, eb = _eye(a), _eye(b)
+    if ea is None or eb is None:
+        return np.nan
+    return float(any(_smoke_blocks(u, ea, eb) for u in state.utility))
 
 
 def _set_pair(state: Snapshot, i: int, j: int, k: int, v: float) -> None:
@@ -249,13 +264,27 @@ def _recompute_rows(state: Snapshot, i: int, ref: Snapshot | None, geometry) -> 
         _set_pair(state, i, j, SAME, float(state.players[i].side == state.players[j].side))
 
 
+def _inside_flag(utility, kind: str, pos) -> int | None:
+    """Mirrors engine.state.utility.inside_flag: 1 inside a known token, 0 when every
+    token of the kind is known and misses, None when one has an unknown radius."""
+    unknown = False
+    for u in utility:
+        if u.kind != kind:
+            continue
+        if _in_token(u, pos):
+            return 1
+        if _bad(u.radius_units):
+            unknown = True
+    return None if unknown else 0
+
+
 def _set_flags(state: Snapshot, i: int) -> None:
     p = state.players[i]
     pos = _pos(p)
     if p.alive != 1 or pos is None:
         return
-    p.in_smoke = int(any(u.kind == "smoke" and _in_token(u, pos) for u in state.utility))
-    p.on_fire  = int(any(u.kind == "fire" and _in_token(u, pos) for u in state.utility))
+    p.in_smoke = _inside_flag(state.utility, "smoke", pos)
+    p.on_fire  = _inside_flag(state.utility, "fire", pos)
 
 
 def _sum_alive(players: list[PlayerToken], side: str, field: str) -> float | None:
@@ -270,39 +299,39 @@ def recompute_derived(state: Snapshot, *, players=(), tokens=(), ref: Snapshot |
     """Fix every field that depends on what an intervention edited. Mutates `state` in
     place (interventions call it on their own copy) and returns it.
 
-    Always: `alive_ct/t`, `equip_ct/t` and `money_ct/t` (sums over alive players, None if
-    any is unknown), `n_active_smokes/fires` (token counts; at the token cap only
-    raised, never lowered below the stored count), `los` NaN for every pair with a dead
-    player.
+    Always: `alive_ct/t` and `equip_ct/t` (sums over alive players, None if any is
+    unknown), `n_active_smokes/fires` (token counts; at the token cap only raised, never
+    lowered below the stored count), `los` NaN for every pair with a dead player.
+    Never `money_ct/t`: the builder sums every roster account (dead included, LIVE_SAFE
+    "current sum of accounts"), dead tokens carry `money = None`, and undoing a kill
+    does not change anyone's account; recomputing it alive-only made v(full) and
+    v(full minus a null member) differ by the dead players' money and broke C1
+    (2026-10-19 audit, HIGH-05).
     `players`: slots that moved or changed alive state; their pair rows are recomputed
     (`dist_units` from positions; `los`/`nav_dist_units` copied from `ref` when both
     players stand where they stood in `ref`, else from `geometry`, else NaN;
     `smoke_between` from the tokens) and their `in_smoke`/`on_fire` flags re-derived.
-    `tokens`: utility tokens that were added or removed; every pair whose segment
-    crosses one gets `smoke_between` recomputed, and every player inside one gets its
-    flags re-derived."""
+    `tokens`: utility tokens that were added or removed; when one is a smoke, every
+    pair's `smoke_between` is recomputed (eye-to-eye, as the builder), and every player
+    inside one (every player, for a token of unknown extent) gets its flags re-derived."""
     ps, c = state.players, state.ctx
     for i in players:
         _recompute_rows(state, i, ref, geometry)
         _set_flags(state, i)
     for u in tokens:
         for i in range(N_PLAYERS):
-            if _in_token(u, _pos(ps[i])):
+            # a token of unknown extent bears on every player's flag (None <-> 0 / 1)
+            if _bad(u.radius_units) or _in_token(u, _pos(ps[i])):
                 _set_flags(state, i)
-        if u.kind != "smoke":
-            continue
+    if any(u.kind == "smoke" for u in tokens):
         for i in range(N_PLAYERS):
             for j in range(i + 1, N_PLAYERS):
-                pa, pb = _pos(ps[i]), _pos(ps[j])
-                if pa is not None and pb is not None and _smoke_blocks(u, pa, pb):
-                    _set_pair(state, i, j, SMOKE, _smoke_value(state, i, j))
+                _set_pair(state, i, j, SMOKE, _smoke_value(state, i, j))
 
     c.alive_ct = sum(1 for p in ps if p.side == "ct" and p.alive == 1)
     c.alive_t  = sum(1 for p in ps if p.side == "t" and p.alive == 1)
     c.equip_ct = _sum_alive(ps, "ct", "equipment_value")
     c.equip_t  = _sum_alive(ps, "t", "equipment_value")
-    c.money_ct = _sum_alive(ps, "ct", "money")
-    c.money_t  = _sum_alive(ps, "t", "money")
     n_smokes = sum(u.kind == "smoke" for u in state.utility)
     n_fires  = sum(u.kind == "fire" for u in state.utility)
     if len(state.utility) < MAX_UTILITY:
@@ -886,7 +915,8 @@ def revert_buy(state: Snapshot, player_id: int, prior_loadout: dict, *, geometry
     """Undo a player's buy: the loadout fields (armor, helmet, kit, weapon class,
     grenades, money, equipment value) set to `prior_loadout`, the economy prior of
     Appendix B.6 (median loadout for money bucket x side x round type, supplied by the
-    caller); team equip/money recomputed. Preconditions: player alive; keys a subset of
+    caller); team equip recomputed, team money (the all-roster sum) shifted by the
+    change to this one account. Preconditions: player alive; keys a subset of
     LOADOUT_FIELDS including `equipment_value`."""
     unknown = set(prior_loadout) - set(LOADOUT_FIELDS)
     if unknown:
@@ -897,8 +927,16 @@ def revert_buy(state: Snapshot, player_id: int, prior_loadout: dict, *, geometry
     p = s.players[_slot(s, player_id, "revert_buy")]
     if p.alive != 1:
         raise InterventionError(f"revert_buy: player {player_id} is dead")
+    old_money = p.money
     for f, v in prior_loadout.items():
         setattr(p, f, v)
+    if "money" in prior_loadout:
+        attr = f"money_{p.side}"
+        team = getattr(s.ctx, attr)
+        if _bad(team) or _bad(old_money) or _bad(p.money):
+            setattr(s.ctx, attr, None)                     # unknown stays unknown, never 0
+        else:
+            setattr(s.ctx, attr, float(team) - float(old_money) + float(p.money))
     return recompute_derived(s, geometry=geometry)
 
 

@@ -245,7 +245,7 @@ def round_kills_damage(sl, steamid: int, enemies) -> tuple[float, float]:
 def token(sl, steamid: int, side: str, geometry, tier: str, utility=(),
           heard_window_s: float = HEARD_WINDOW_S) -> PlayerToken:
     """The A.2 token of one roster player at sl.tick."""
-    from engine.state.utility import inside   # local: utility imports nothing from here
+    from engine.state.utility import inside_flag   # local: utility imports nothing from here
 
     enemies = {s for s, sd in sl.sides.items() if sd != side}
     kills, dmg = round_kills_damage(sl, steamid, enemies)
@@ -278,8 +278,8 @@ def token(sl, steamid: int, side: str, geometry, tier: str, utility=(),
         counts = grenade_counts(row("inventory"))
         in_smoke = on_fire = None
         if pos is not None:
-            in_smoke = int(any(inside(u, *pos) for u in utility if u.kind == "smoke"))
-            on_fire  = int(any(inside(u, *pos) for u in utility if u.kind == "fire"))
+            in_smoke = inside_flag(utility, "smoke", *pos)
+            on_fire  = inside_flag(utility, "fire", *pos)      # None while a fire of unknown extent burns
         live = dict(
             yaw=_float(row("yaw")), pitch=_float(row("pitch")),
             speed=None if vx is None or vy is None else math.hypot(vx, vy),

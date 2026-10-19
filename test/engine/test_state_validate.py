@@ -116,13 +116,17 @@ section("recompute_derived repairs derived fields")
 s = base.copy()
 s.ctx.alive_ct, s.ctx.alive_t = 0, 0
 s.ctx.equip_ct = s.ctx.equip_t = 1.0
-s.ctx.money_ct = None
 s.ctx.n_active_smokes, s.ctx.n_active_fires = 5, 3
 i, j = s.index_of(101), s.index_of(205)
 s.pair[i, j, LOS] = s.pair[j, i, LOS] = 1.0
 check("corrupted copy is caught", len(s.validate()) >= 3)
 recompute_derived(s)
 check("recompute_derived restores counts, sums, dead LOS", not s.validate() and s == base, "; ".join(s.validate()[:2]))
+s = base.copy()
+s.ctx.money_ct = 123.0
+recompute_derived(s)
+check("recompute_derived leaves money alone (all-roster accounts are not derivable from tokens; HIGH-05)",
+      s.ctx.money_ct == 123.0)
 
 s = base.copy()
 pl(s, 104).alive = 0

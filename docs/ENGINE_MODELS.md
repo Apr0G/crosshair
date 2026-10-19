@@ -16,10 +16,10 @@ does **not** mean usable. A model is **adopted** only when it has a row with sta
   model whose numbers fail P6.7.2.
 - One row per model. To take a model out of use, change the **status** cell of its row
   in place to `retired`, `superseded`, `revoked` or `rejected`. Do not add a second row.
-- Name a model version (the `<kind>_v` prefix followed by digits) **only inside table
-  rows**. `engine.analyze` scans every line of this file and treats any such token on a
-  line without the words reject / retire / supersede / revoke as adopted, so a version
-  mentioned in prose would be adopted by accident.
+- Only the **model cell** of a row with status `adopted` adopts a model.
+  `engine.analyze` reads the table through the registry (`adoption_rows`), so a
+  version named in prose or in another row's rule text adopts nothing; the registry
+  still refuses rule text that names another model version, to keep rows unambiguous.
 - All numbers are on the **test pro** months of the split file the model was trained
   with (never val, never FACEIT).
 - `docs/ENGINE_PROGRESS.md` is the place for narrative; this file is the record.

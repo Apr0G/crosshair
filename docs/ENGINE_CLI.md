@@ -143,9 +143,16 @@ per table + `meta.parquet` + `manifest.json`).
 python -m engine.cli parse <dir|demo.dem> [--workers N] [--force] [--smoke] [--out DIR]
 ```
 
-`--smoke` runs only the header + quarantine check and writes nothing. Prints one JSON
-result line per demo on stdout. Exit 1 when any demo failed; 2 when the path is missing
-or (directory) free space is below 20 GB.
+The quarantine rules (P1.4.1) run on the header before every parse: a demo that fails
+one is reported as `status: quarantined` with the `reason`, nothing is parsed or
+written, and when the match has a `matches` row the file is moved under
+`data/engine/demos/quarantine/<reason>/` and the row set to `quarantined` (`moved: true`
+in the result; without a row the file stays, `moved: false`). `build-states` and
+`build-actions` refuse a quarantined match and never overwrite its status.
+`--smoke` runs only the header + quarantine check and writes nothing (no move either).
+Prints one JSON result line per demo on stdout. Exit 1 when any demo failed (a
+quarantined demo is not a failure); 2 when the path is missing or (directory) free
+space is below 20 GB.
 
 ### `build-states`
 
@@ -323,18 +330,19 @@ python -m engine.cli ingest <demo.dem> [--match-id ID] [--tier pro|faceit_10|gol
 
 ## Model adoption (`docs/ENGINE_MODELS.md`)
 
-`analyze` refuses a model that is not adopted (P12.1) unless `--allow-unadopted`. A
-model counts as adopted when its directory name (for example `wp_v3`) appears on a line
-of `docs/ENGINE_MODELS.md` that does not contain "rejected", "retired", "superseded" or
-"revoked". Suggested format, one row per decision:
+`analyze` refuses a model that is not adopted (P12.1) unless `--allow-unadopted`. This
+applies to the win model (`--model` / `--model-dir`) and to the value models
+(`--q-model` and `--neighbours`) alike; with `--allow-unadopted` each unadopted one
+adds a `model_unadopted` warning to the report. A model counts as adopted when the
+adoption table of `docs/ENGINE_MODELS.md` has a row whose model cell is its directory
+name (for example `wp_v3`) and whose status cell is `adopted`. Rows are added with
+`python -m engine.evaluation.registry adopt ...`, never by hand; the table header is
 
 ```
-| date | version | eval numbers | decision |
-|---|---|---|---|
-| 2026-11-01 | wp_v3 | ECE 0.015, log loss 0.512 | adopted (P6.7 rule met) |
+| date | model | kind | log loss | Brier | ECE | baseline log loss | hazard AUC | decision rule satisfied | status |
 ```
 
-The file does not exist yet, so no model is adopted today.
+The table is empty today, so no model is adopted.
 
 ## Report schema
 

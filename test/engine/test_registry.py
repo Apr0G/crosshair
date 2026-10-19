@@ -28,9 +28,10 @@ def agrees(doc: Path, names: list[str]) -> None:
     if adopted_models is None:
         skip("engine.analyze.adopted_models agrees", _why)
         return
-    loose = adopted_models(doc)
-    check(f"engine.analyze agrees on {names}", all((n in loose) == rg.is_adopted(n, doc) for n in names),
-          f"loose={sorted(loose)}")
+    strict = adopted_models(doc)
+    want = {r["model"] for r in rg.adoption_rows(doc) if r["status"].lower() == "adopted"}
+    check(f"engine.analyze agrees on {names} (whole set)", strict == want
+          and all((n in strict) == rg.is_adopted(n, doc) for n in names), f"analyze={sorted(strict)} registry={sorted(want)}")
 
 
 def model_dir(root: Path, name: str, cal: dict | None = None, extra: dict | None = None) -> Path:
@@ -51,7 +52,7 @@ section("docs/ENGINE_MODELS.md")
 text = DOC.read_text(encoding="utf-8") if DOC.is_file() else ""
 check("doc exists with the adoption table header", rg._table_bounds(text.splitlines()) is not None)
 check("no adoption rows yet", rg.adoption_rows(DOC) == [])
-check("no model-version token anywhere (engine.analyze would adopt it)",
+check("no model-version token in the doc's prose (rows only; none exist yet)",
       re.findall(r"\b[a-z]+_v\d+\b", text) == [], f"{re.findall(r'[a-z]+_v[0-9]+', text)}")
 check("P6.7.2 thresholds written down", "0.01" in text and "0.02" in text and "0.80" in text and "0.75" in text)
 
@@ -110,6 +111,9 @@ with tempfile.TemporaryDirectory() as td:
     refused("rule text with 'rejected' refused (analyze would skip the row)",
             lambda: rg.adopt("wp_v8", GOOD, "not rejected by anyone", doc=doc, models_dir=models))
     refused("rule text with '|' refused", lambda: rg.adopt("wp_v8", GOOD, "a | b", doc=doc, models_dir=models))
+    refused("rule text naming another model refused (HIGH-02)",
+            lambda: rg.adopt("wp_v8", GOOD, "beats wp_v7 by 0.02", doc=doc, models_dir=models))
+    agrees(doc, ["wp_v7", "wp_v8"])
     refused("model without a manifest refused", lambda: rg.adopt("wp_v9", GOOD, "ok", doc=doc, models_dir=models))
     refused("bad name refused", lambda: rg.adopt("WP-7", GOOD, "ok", doc=doc, models_dir=models))
     refused("unknown number key refused", lambda: rg.adopt("wp_v8", {**GOOD, "auc": 0.9}, "ok", doc=doc,

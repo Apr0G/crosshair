@@ -133,6 +133,22 @@ check("C's kill of B: fire_pressure linked to D's molotov, beneficiary D",
       == [{"action_id": mol.action_id, "kind": "fire_pressure", "beneficiary_id": PID["D"]}])
 check("A's kill of C (C never in the fire): no fire_pressure", "fire_pressure" not in kinds(kill_at(fa, 2000, "A")))
 
+section("fire_pressure without an extent: the victim was burning (HIGH-04, the real-demo shape)")
+inf_none = inf_rows.with_columns(pl.lit(None, dtype=pl.Float32).alias("extent_radius"))
+burn = pl.DataFrame([dict(tick=1900, round_num=1, attacker_steamid=SID["D"], victim_steamid=SID["B"],
+                          weapon="inferno", dmg_health=7, dmg_armor=0, hitgroup="generic")], schema=raw.damages.schema)
+raw_burn = dataclasses.replace(raw, infernos=inf_none, damages=pl.concat([raw.damages, burn]).sort("tick"))
+_, fb, _ = run(raw_burn)
+molb = next(a for a in fb if a.type == "molotov")
+check("molotov with null extent: radius_units None", molb.params["radius_units"] is None)
+check("C's kill of B: fire_pressure linked through the inferno damage row, beneficiary D",
+      [e for e in kill_at(fb, 2000, "C").enablers if e["kind"] == "fire_pressure"]
+      == [{"action_id": molb.action_id, "kind": "fire_pressure", "beneficiary_id": PID["D"]}])
+check("A's kill of C (C never burned): no fire_pressure", "fire_pressure" not in kinds(kill_at(fb, 2000, "A")))
+_, fn, _ = run(dataclasses.replace(raw, infernos=inf_none))
+check("null extent and no burn damage: no fire_pressure (unknown, not asserted)",
+      "fire_pressure" not in kinds(kill_at(fn, 2000, "C")))
+
 # ── order and determinism ──
 section("sorted by (kind, action_id), deterministic")
 for acts in (base, trade, dk, fa):

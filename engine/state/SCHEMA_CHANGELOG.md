@@ -26,3 +26,9 @@ First version (P3, Amendment 1 contracts).
   already happened (or for an empty slot).
 - Positions are raw Hammer units, angles raw degrees (normalization happens in the
   model).
+- Amendment, same day (2026-10-19, audit HIGH-04; no `states.parquet` had been built
+  outside temp dirs, so no version bump): `player.on_fire` may be None while alive.
+  It is 1 inside a fire of known extent, 0 when every active fire is known and misses,
+  None when a fire of unknown extent is burning (awpy 3.1 emits `extent_radius` null,
+  so on real demos it is None for the life of every molotov). Dataset layout unchanged:
+  the field was already nullable and carries a `present_on_fire` bit.

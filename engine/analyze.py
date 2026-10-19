@@ -35,8 +35,10 @@ engine DB when `CROSSHAIR_ENGINE_DB` points elsewhere (tests), else
 Guards (P11.3.3, P12.1): quarantine rules before parsing (a 64-tick demo is refused
 with the reason); a `--tier` that differs from the demo's source tier (its `matches`
 row, else a FACEIT server name) is a warning; a map version with < 100 registered
-matches is a warning (skipped with a note when there is no engine DB); a model not
-listed in docs/ENGINE_MODELS.md is refused unless `allow_unadopted`.
+matches is a warning (skipped with a note when there is no engine DB); a model without
+an `adopted` row in the adoption table of docs/ENGINE_MODELS.md is refused unless
+`allow_unadopted` (the win model AND the value models `--q-model` / `--neighbours`;
+2026-10-19 audit HIGH-02, HIGH-03).
 
 Test hooks (never used by a real analysis): `stub_predictor()` (env
 `CROSSHAIR_STUB_PREDICTOR=1` in the CLI) and `synthetic_raw(story)` (CLI
@@ -45,7 +47,6 @@ Test hooks (never used by a real analysis): `stub_predictor()` (env
 import json
 import math
 import os
-import re
 import sys
 import time
 from collections import Counter
@@ -69,7 +70,6 @@ MIN_MAP_MATCHES   = 100                  # P11.3.1: warn below this many matches
 MODELS_DOC        = paths.ROOT / "docs" / "ENGINE_MODELS.md"
 STUB_ENV          = "CROSSHAIR_STUB_PREDICTOR"
 TEST_DIR          = paths.ROOT / "test" / "engine"
-_NOT_ADOPTED_RE   = re.compile(r"reject|retire|supersede|revoke", re.IGNORECASE)
 _WHERE_KEYS       = ("attacker_callout", "from_callout", "throw_callout", "planter_callout", "callout",
                      "land_callout", "to_callout")
 
@@ -277,17 +277,13 @@ def guard_warnings(meta: dict, tier: str, map_version: str | None, logger=None) 
 
 
 def adopted_models(doc: Path | None = None) -> set[str]:
-    """Model names adopted in docs/ENGINE_MODELS.md (P12.1): every `<kind>_v<N>` token on
-    a line that does not say rejected / retired / superseded / revoked."""
+    """Model names with an `adopted` row in the adoption table of docs/ENGINE_MODELS.md
+    (P12.1), read with `engine.evaluation.registry.adoption_rows`: the model cell and
+    the status cell, nothing else. A version named in prose or in another row's rule
+    text adopts nothing (2026-10-19 audit, HIGH-02)."""
+    from engine.evaluation import registry
     doc = Path(doc) if doc is not None else MODELS_DOC
-    if not doc.is_file():
-        return set()
-    out = set()
-    for line in doc.read_text(encoding="utf-8").splitlines():
-        if _NOT_ADOPTED_RE.search(line):
-            continue
-        out.update(re.findall(r"\b[a-z]+_v\d+\b", line))
-    return out
+    return {r["model"] for r in registry.adoption_rows(doc) if r["status"].lower() == "adopted"}
 
 
 def resolve_model_dir(model: str | None, model_dir: str | Path | None) -> Path:
@@ -298,13 +294,28 @@ def resolve_model_dir(model: str | None, model_dir: str | Path | None) -> Path:
     raise ModelUnavailable("no model given: pass --model wp_vN (under data/engine/models) or --model-dir")
 
 
-def check_model(model_dir: Path, allow_unadopted: bool = False, doc: Path | None = None) -> None:
+def check_model(model_dir: Path, allow_unadopted: bool = False, doc: Path | None = None,
+                hint: str = "train one with `train-wp`") -> None:
     model_dir = Path(model_dir)
     if not model_dir.is_dir():
-        raise ModelUnavailable(f"model directory not found: {model_dir.name} (train one with `train-wp`)")
+        raise ModelUnavailable(f"model directory not found: {model_dir.name} ({hint})")
     if not allow_unadopted and model_dir.name not in adopted_models(doc):
         raise ModelUnavailable(f"model {model_dir.name} is not adopted in docs/ENGINE_MODELS.md; "
                                f"pass --allow-unadopted to use it anyway")
+
+
+VALUE_HINTS = ("train one with `train-q`", "build one with `build-neighbours`")
+
+
+def check_value_models(value_dirs: tuple, allow_unadopted: bool, warnings: list, logger=None,
+                       doc: Path | None = None) -> None:
+    """The adoption gate for the value stage (P12.1 applies to every model a report
+    uses): `--q-model` and `--neighbours` directories must exist and be adopted, or
+    `allow_unadopted` is set and each unadopted one is a `model_unadopted` warning."""
+    for d, hint in zip(value_dirs, VALUE_HINTS):
+        check_model(d, allow_unadopted, doc, hint)
+        if allow_unadopted and Path(d).name not in adopted_models(doc):
+            _warn(warnings, "model_unadopted", f"model {Path(d).name} is not adopted (--allow-unadopted)", logger)
 
 
 def load_predictor(model_dir: Path, device: str | None):
@@ -829,6 +840,7 @@ def analyze_demo(path, *, tier: str, out_dir, model_dir=None, device: str | None
         model_versions["wp"] = getattr(predictor, "name", None) or type(predictor).__name__
     vm = None
     if value_dirs is not None:
+        check_value_models(value_dirs, allow_unadopted, warnings, logger)
         vm = ValueModels.load(value_dirs[0], value_dirs[1], device or "cpu")
 
     with timed("parse", timings):

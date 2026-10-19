@@ -135,7 +135,10 @@ to the A.1 vocabularies would be an additive schema change (ask first).
   Neither could be tried without a demo. Revisit on the golden demo; until then the
   state builder computes visibility itself (P3.5, VisibilityChecker).
 - `ticks.is_reloading`: null whenever awpy's own field is absent (awpy documents this).
-- `infernos.extent_radius`: no per-flame data in `demo.fires`.
+- `infernos.extent_radius`: no per-flame data in `demo.fires`. Consequences:
+  `player.on_fire` is None (unknown, never 0) while a fire burns, and the
+  `fire_pressure` enabler links through inferno damage rows (victim burning), not
+  through the extent.
 - `grenades.expire_tick` for flash, HE (instant by definition) and decoy (not exposed).
 - `rounds.official_end_tick` for the last round (not in the demo).
 - `kills.flash_assister_steamid` unless awpy's kills frame carries `assistedflash`
@@ -147,13 +150,16 @@ none; the quarantine side count ignores steamid 0 (a bot-filled side fails `not_
 
 ### Quarantine (P1.4.1) from `header_info` / `quarantine_check`
 
-`header_info(path)` reads the header only; `with_roster=True` (used by `worker --smoke`)
-also reads `rounds` and `players`. Reasons, in order: `tick_rate_not_128` (|rate - 128|
+`header_info(path)` reads the header only; `with_roster=True` (used by `worker` before
+every parse, by `--smoke` and by `analyze`) also reads `rounds` and `players`. Reasons, in order: `tick_rate_not_128` (|rate - 128|
 > 0.5, or unknown), `too_few_rounds` (< 16), `not_5v5` (distinct non-bot players per
 side != 5), `unknown_map` (not in `engine.maps.assets.ACTIVE_POOL`),
 `duration_implausible` (playback time outside 15 min to 5 h). `config.yaml` has no
 quarantine keys (Appendix D lists none), so the thresholds are constants at the top of
 `awpy3_parser.py`. The worker adds `header_unreadable` when the header cannot be read.
+This is the only rule table: `engine.data.quarantine.check` delegates to it (judging a
+missing key as a failure) and `quarantine.quarantine()` moves the file and sets the row,
+accepting exactly these reason strings.
 
 ### Map assets
 

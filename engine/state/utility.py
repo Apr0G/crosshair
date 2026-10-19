@@ -82,3 +82,20 @@ def inside(u: UtilityToken, x: float, y: float, z: float) -> bool:
     if u.kind == "fire":
         return math.hypot(x - u.x, y - u.y) <= u.radius_units and abs(z - u.z) <= FIRE_Z_TOL
     return False
+
+
+def inside_flag(utility: list[UtilityToken], kind: str, x: float, y: float, z: float) -> int | None:
+    """`in_smoke` / `on_fire` as a tri-state: 1 inside some active token of `kind` with
+    a known radius, 0 when every token of that kind is known and misses, None when no
+    known token contains the point but one of that kind has an unknown radius (it
+    might). awpy 3.1 gives no flame extents, so on a real demo `on_fire` is None
+    whenever a fire is burning: unknown is never written as 0 (2026-10-19 audit, HIGH-04)."""
+    unknown = False
+    for u in utility:
+        if u.kind != kind:
+            continue
+        if inside(u, x, y, z):
+            return 1
+        if u.radius_units is None:
+            unknown = True
+    return None if unknown else 0

@@ -11,11 +11,17 @@ already-parsed matches skipped unless `--force`.
 `RawTables.from_parsed(...).validate()` before anything is written. A match counts as parsed when its
 `manifest.json` exists; the manifest is written last, so a crash mid-write leaves a
 match that is simply parsed again. `--smoke` runs only `header_info` +
-`quarantine_check` (P1.4.1) per demo and writes nothing. Moving quarantined files is
-the P1.4 stage's job, not this one.
+`quarantine_check` (P1.4.1) per demo and writes nothing.
 
-The parser is injectable (`run(..., parser=f)`, f(path) -> (tables, meta)) so tests
-can use a fake; it must be a module-level function when `procs > 1` (pickled).
+The quarantine rules (P1.4.1) run on the header BEFORE every parse, not only under
+`--smoke`: a demo that fails one gets status `quarantined` with the reason and nothing
+is written (2026-10-19 audit, HIGH-01). Moving the file under `demos/quarantine/` and
+setting the `matches` row is done by `engine.cli parse`, which owns the DB; this module
+only reports.
+
+The parser and the header reader are injectable (`run(..., parser=f, header_fn=h)`,
+f(path) -> (tables, meta), h(path, with_roster=True) -> meta) so tests can use fakes;
+both must be module-level functions when `procs > 1` (pickled).
 """
 import argparse
 import json
@@ -96,13 +102,29 @@ def _write(path: Path, out: Path, tables: dict, meta: dict, timings: dict) -> No
 
 # ── one demo ──────────────────────────────────────────────────────────────────
 
-def parse_one(path: Path, out_dir: Path, parser: Parser | None = None, force: bool = False) -> dict:
+def quarantine_reason(path: Path, header_fn: HeaderFn | None = None) -> str | None:
+    """P1.4.1 on the header + roster: the failing rule, `header_unreadable` when the
+    header cannot be read, None when the demo passes."""
+    header_fn = header_fn or awpy3_parser.header_info
+    try:
+        info = header_fn(path, with_roster=True)
+    except Exception:
+        return "header_unreadable"
+    return awpy3_parser.quarantine_check(info)
+
+
+def parse_one(path: Path, out_dir: Path, parser: Parser | None = None, force: bool = False,
+              header_fn: HeaderFn | None = None) -> dict:
     """Parse and write one demo; never raises. Returns a result dict with
-    status parsed | skipped | failed."""
+    status parsed | skipped | quarantined | failed. Quarantined: the header failed a
+    P1.4.1 rule (`reason`), nothing was parsed or written."""
     path, out_dir = Path(path), Path(out_dir)
     key = match_key(path)
     if not force and is_parsed(out_dir, key):
         return {"match_key": key, "status": "skipped"}
+    reason = quarantine_reason(path, header_fn)
+    if reason is not None:
+        return {"match_key": key, "status": "quarantined", "reason": reason, "path": str(path)}
     parser = parser or awpy3_parser.parse
     last: BaseException | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -129,11 +151,11 @@ def smoke_one(path: Path, header_fn: HeaderFn | None = None) -> dict:
         info = header_fn(path, with_roster=True)
     except Exception as exc:
         return {"match_key": key, "status": "quarantine", "reason": "header_unreadable",
-                "exc_type": type(exc).__name__, "error": redact_text(str(exc))}
+                "exc_type": type(exc).__name__, "error": redact_text(str(exc)), "path": str(path)}
     reason = awpy3_parser.quarantine_check(info)
     brief = {k: info.get(k) for k in ("map", "tick_rate", "n_rounds", "side_counts", "duration_s")}
     return {"match_key": key, "status": "ok" if reason is None else "quarantine",
-            "reason": reason, "info": brief}
+            "reason": reason, "info": brief, "path": str(path)}
 
 
 def _append_failures(out_dir: Path, results: list[dict]) -> None:
@@ -160,7 +182,7 @@ def run(demo_dir: Path, *, out_dir: Path | None = None, procs: int | None = None
     if smoke:
         jobs, args = smoke_one, [(p, header_fn) for p in demos]
     else:
-        jobs, args = parse_one, [(p, out_dir, parser, force) for p in demos]
+        jobs, args = parse_one, [(p, out_dir, parser, force, header_fn) for p in demos]
     if procs == 1 or len(demos) <= 1:
         results = [jobs(*a) for a in args]
     else:

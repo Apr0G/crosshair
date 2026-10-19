@@ -174,6 +174,12 @@ fire_post = make_snapshot(fires=[{"x": 0.0, "y": 0.0, "z": 0.0, "owner": 203}])
 check("fire story: CT 101 on fire in s_post", pl(fire_post, 101).on_fire == 1)
 fr = run("remove fire", iv.remove_utility, fire_post, action("fire_start", 203))
 check("on_fire cleared, n_active_fires 0", pl(fr, 101).on_fire == 0 and fr.ctx.n_active_fires == 0 and fr.players == fire_pre.players)
+unk_post = make_snapshot(fires=[{"x": 0.0, "y": 0.0, "z": 0.0, "owner": 203, "radius": "unknown"}])
+check("fire of unknown extent: on_fire None for every alive player (HIGH-04)",
+      all(p.on_fire is None for p in unk_post.players if p.alive == 1) and unk_post.validate() == [])
+ur = run("remove unknown-extent fire", iv.remove_utility, unk_post, action("fire_start", 203))
+check("removing it resolves on_fire to 0 (a real change, no longer inert)",
+      all(p.on_fire == 0 for p in ur.players if p.alive == 1) and ur.ctx.n_active_fires == 0)
 
 # ── P7.1.4 flash ──────────────────────────────────────────────────────────────
 section("unflash / reflash")

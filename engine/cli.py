@@ -271,7 +271,10 @@ def cmd_analyze(a, cfg, lg, run_id: str, timings: dict) -> int:
         geo = FlatGeometry()
         warnings = analyze.guard_warnings(raw.meta, a.tier, geo.map_version, lg)
         key = a.demo.stem
-        vm = analyze.ValueModels.load(*value_dirs, device or "cpu") if value_dirs else None
+        vm = None
+        if value_dirs:
+            analyze.check_value_models(value_dirs, a.allow_unadopted, warnings, lg)
+            vm = analyze.ValueModels.load(*value_dirs, device or "cpu")
         res = analyze.analyze_tables(raw, match_key=key, tier=a.tier, geometry=geo, predictor=predictor, cfg=cfg,
                                      value_models=vm, out_dir=a.out or paths.REPORTS_DIR / key, run_id=run_id,
                                      show_ids=a.show_ids, model_versions=model_versions, warnings=warnings,
@@ -311,10 +314,35 @@ def cmd_parse(a, cfg, lg, run_id: str, timings: dict) -> int:
         r = worker.smoke_one(t) if a.smoke else worker.parse_one(t, out, force=a.force)
         results, counts = [r], {r["status"]: 1}
     timings["parse"] = time.perf_counter() - t0
+    if not a.smoke:
+        _quarantine_results(results, lg)
     for r in results:
         say(json.dumps(r, ensure_ascii=False, default=str))
     lg.info("parse done", **{k: v for k, v in sorted(counts.items())})
     return 1 if counts.get("failed") else 0
+
+
+def _quarantine_results(results: list[dict], lg) -> None:
+    """P1.4.1 follow-through for `parse` (not `--smoke`): a demo the worker reported as
+    `quarantined` is moved under `demos/quarantine/<reason>/` and its `matches` row set
+    to `quarantined`, when it has one. Without a DB row the file stays and the result
+    says so (`moved: False`)."""
+    from engine import db
+    from engine.data import quarantine
+    for r in results:
+        if r.get("status") != "quarantined":
+            continue
+        row = db.get_match(r["match_key"]) if db.db_path().is_file() else None
+        if row is None:
+            r["moved"] = False
+            continue
+        try:
+            dest = quarantine.quarantine(r["match_key"], Path(r["path"]), r["reason"])
+            r["moved"], r["path"] = True, str(dest)
+        except (FileNotFoundError, FileExistsError, KeyError, ValueError) as exc:
+            r["moved"], r["error"] = False, f"{type(exc).__name__}: {exc}"
+            lg.error("quarantine move failed", match_key=r["match_key"], reason=r["reason"],
+                     error=r["error"])
 
 
 def _parsed_raw(key: str):
@@ -339,8 +367,10 @@ def _build_one(key: str, a, cfg, lg, timings: dict, write: str) -> None:
     from engine.state import builder
     from engine.state.geometry import MapGeometry
     from engine.state.schema import SCHEMA_VERSION
-    raw = _parsed_raw(key)
     row = db.get_match(key) if db.db_path().is_file() else None
+    if row is not None and row.get("status") == "quarantined":
+        raise CLIError(f"{key} is quarantined ({row.get('quarantine_reason')}); not building {write}")
+    raw = _parsed_raw(key)
     tier = (row or {}).get("tier") or a.tier
     if tier not in ANALYZE_TIERS:
         raise CLIError(f"{key}: tier unknown ({tier!r}); pass --tier")

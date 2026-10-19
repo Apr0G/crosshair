@@ -312,8 +312,8 @@ class Snapshot:
                 if bad:
                     problems.append(f"player {i}: dead but has {bad}")
             elif p.alive == 1:
-                bad = [f for f in ("in_smoke", "on_fire", "flash_duration_remaining")
-                       if getattr(p, f) is None]
+                # on_fire is allowed None while alive: unknown fire extent (HIGH-04, 2026-10-19)
+                bad = [f for f in ("in_smoke", "flash_duration_remaining") if getattr(p, f) is None]
                 if bad:
                     problems.append(f"player {i}: alive but {bad} null")
 
@@ -439,7 +439,8 @@ LIVE_SAFE: dict[str, str] = {
     "player.is_planting":                      "current per-tick prop",
     "player.flash_duration_remaining":         "current: blind time left from a flash that already popped",
     "player.in_smoke":                         "derived from current position and active smoke tokens",
-    "player.on_fire":                          "derived from current position and active fire tokens",
+    "player.on_fire":                          "derived from current position and active fire tokens; None (never 0) "
+                                               "while a fire of unknown extent burns: awpy 3.1 gives no flame extents",
     "player.money":                            "current account balance",
     "player.equipment_value":                  "current loadout value",
     "player.seconds_since_last_seen_by_enemy": "past only: last spotted tick <= t",

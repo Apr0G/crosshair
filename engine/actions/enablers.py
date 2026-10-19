@@ -23,8 +23,11 @@ before it). `recent` = `actions.enabler_recent_s`.
   qualifies even when the two deaths are far apart); linked to the kill action whose
   victim is the teammate; beneficiary = the dead teammate.
 - he_damage: an HE action listing the victim, detonated in [tick - recent, tick - 1].
-- fire_pressure: a molotov action active during [tick - recent, tick - 1] whose extent
-  (radius_units, 2D + FIRE_Z_TOL) contained the victim's position at some tick there.
+- fire_pressure: a molotov action active during [tick - recent, tick - 1] whose fire
+  damaged the victim at some tick there (inferno / molotov / incgrenade damage rows by
+  the thrower: the plan's "victim on fire" branch, which needs no extent and is the
+  only one that fires on real demos, where awpy gives no flame extents), or whose
+  extent (radius_units, 2D + FIRE_Z_TOL) contained the victim's position then.
 - info: a teammate of the actor (not the actor) spotted the victim (`spotted_by`) or
   heard them (a victim shot or footstep within HEARD_RADIUS of that teammate, both
   alive) in [tick - recent, tick - 1]; linked to that teammate's latest peek at the
@@ -75,7 +78,15 @@ def sort_entries(entries: list[dict]) -> list[dict]:
 class _Index:
     def __init__(self, actions: list[Action], raw=None):
         self.sounds: dict[int, tuple] = {}     # steamid -> (fire ticks, step ticks, step xyz)
+        self.burns: dict[tuple, list] = {}     # (round, victim steamid) -> [(tick, attacker steamid)]
         if raw is not None:
+            d = raw.damages
+            for r, t, att, vic, w in zip(d["round_num"].to_list(), d["tick"].to_list(),
+                                         d["attacker_steamid"].to_list(), d["victim_steamid"].to_list(),
+                                         d["weapon"].to_list()):
+                if None in (r, t, att, vic) or utility.short_name(w) not in utility.FIRE_WEAPONS:
+                    continue
+                self.burns.setdefault((int(r), int(vic)), []).append((int(t), int(att)))
             fire: dict[int, list] = {}
             for t, sid in zip(raw.weapon_fire["tick"].to_list(), raw.weapon_fire["steamid"].to_list()):
                 if t is not None and sid is not None:
@@ -183,13 +194,20 @@ def _fire(ix, ctx, e, r, vid, recent: int) -> list[dict]:
     if tr is None:
         return []
     lo, hi, out = e.tick - recent, e.tick - 1, []
+    burns = ix.burns.get((r, v_sid), [])
     for a in ix.fires:
-        rad = a.params.get("radius_units")
-        c = tuple(a.params.get(k) for k in ("x", "y", "z"))
-        if a.round_num != r or rad is None or None in c:
+        if a.round_num != r:
             continue
         a_lo, a_hi = max(lo, a.window_start_tick), min(hi, a.window_end_tick)
         if a_lo > a_hi:
+            continue
+        a_sid = ctx.sid_of_pid.get(a.actor_id_hash)
+        if any(a_lo <= t <= a_hi and att == a_sid for t, att in burns):
+            out.append(_entry(a.action_id, "fire_pressure", a.actor_id_hash))   # victim was burning
+            continue
+        rad = a.params.get("radius_units")
+        c = tuple(a.params.get(k) for k in ("x", "y", "z"))
+        if rad is None or None in c:
             continue
         sl = tr.span(a_lo, a_hi)
         xs, ys, zs = tr.col("x")[sl], tr.col("y")[sl], tr.col("z")[sl]

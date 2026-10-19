@@ -84,9 +84,12 @@ check("no DB -> no warning (check skipped)", w == [])
 
 section("model adoption (P12.1)")
 doc = TMP / "ENGINE_MODELS.md"
-doc.write_text("# Models\n\n| date | version | decision |\n|---|---|---|\n"
-               "| 2026-11-01 | wp_v3 | adopted: ECE 0.015 |\n| 2026-11-02 | wp_v4 | rejected |\n", encoding="utf-8")
-check("adopted_models reads adopted lines, skips rejected", analyze.adopted_models(doc) == {"wp_v3"})
+HEADER = "| date | model | kind | log loss | Brier | ECE | baseline log loss | hazard AUC | decision rule satisfied | status |"
+doc.write_text("# Models\n\nProse may mention wp_v5 without adopting it.\n\n" + HEADER + "\n|---|---|---|---|---|---|---|---|---|---|\n"
+               "| 2026-11-01 | wp_v3 | wp | 0.4600 | 0.1500 | 0.0150 | 0.4900 | – | P6.7.2: beats LightGBM | adopted |\n"
+               "| 2026-11-02 | wp_v4 | wp | 0.4700 | 0.1500 | 0.0300 | 0.4900 | – | ECE too high | rejected |\n",
+               encoding="utf-8")
+check("adopted_models reads adopted rows, skips rejected and prose", analyze.adopted_models(doc) == {"wp_v3"})
 check("missing ENGINE_MODELS.md -> nothing adopted", analyze.adopted_models(TMP / "none.md") == set())
 for name in ("wp_v3", "wp_v4"):
     (TMP / name).mkdir()

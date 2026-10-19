@@ -30,10 +30,16 @@ EYE_DUCK  = 46.0     # u, eye height above the origin, ducking
 LOS, DIST, NAV, SMOKE, SAME = range(len(PAIR_CHANNELS))
 
 
-def _eye(p) -> tuple[float, float, float] | None:
+def eye_point(p) -> tuple[float, float, float] | None:
+    """The point LOS and smoke_between are cast from: the position raised by the eye
+    height (ducking or standing). Shared with the counterfactual editor so edited
+    states use the same definition as built ones (2026-10-19 audit, HIGH-06)."""
     if None in (p.x, p.y, p.z):
         return None
     return (p.x, p.y, p.z + (EYE_DUCK if p.is_ducking == 1 else EYE_STAND))
+
+
+_eye = eye_point
 
 
 def segment_hits_sphere(a, b, centre, radius: float) -> bool:

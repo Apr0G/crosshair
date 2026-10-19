@@ -92,6 +92,10 @@ class BlindGeometry(OpenGeometry):
 
 # ── independent derived-field code (the tests compare interventions against it) ─
 
+def _eye(p) -> tuple[float, float, float]:
+    return (p.x, p.y, p.z + (46.0 if p.is_ducking == 1 else 64.0))
+
+
 def _seg_sphere(a, b, c, r) -> bool:
     ab = np.subtract(b, a)
     t = 0.0 if not ab.any() else float(np.clip(np.dot(np.subtract(c, a), ab) / np.dot(ab, ab), 0, 1))
@@ -99,11 +103,26 @@ def _seg_sphere(a, b, c, r) -> bool:
 
 
 def _inside(u: UtilityToken, p) -> bool:
+    if u.radius_units is None:
+        return False
     if u.kind == "smoke":
         return math.dist(p, (u.x, u.y, u.z)) <= u.radius_units
     if u.kind == "fire":
         return math.hypot(p[0] - u.x, p[1] - u.y) <= u.radius_units and abs(p[2] - u.z) <= 64.0
     return False
+
+
+def _inside_flag(utility, kind: str, p) -> int | None:
+    """As engine.state.utility.inside_flag: 1 / 0 / None (a token of unknown radius)."""
+    unknown = False
+    for u in utility:
+        if u.kind != kind:
+            continue
+        if _inside(u, p):
+            return 1
+        if u.radius_units is None:
+            unknown = True
+    return None if unknown else 0
 
 
 def build_pair(players: list[PlayerToken], utility: list[UtilityToken]) -> np.ndarray:
@@ -114,11 +133,12 @@ def build_pair(players: list[PlayerToken], utility: list[UtilityToken]) -> np.nd
                 continue
             a, b = players[i], players[j]
             pa, pb = (a.x, a.y, a.z), (b.x, b.y, b.z)
+            ea, eb = _eye(a), _eye(b)                  # LOS and smoke are cast from eye points
             pr[i, j, 0] = 1.0 if a.side != b.side and a.alive and b.alive else np.nan
             pr[i, j, 1] = math.dist(pa, pb)
             pr[i, j, 2] = math.dist(_centre(a.nav_area), _centre(b.nav_area))
-            pr[i, j, 3] = float(any(u.kind == "smoke" and _seg_sphere(pa, pb, (u.x, u.y, u.z), u.radius_units)
-                                    for u in utility))
+            pr[i, j, 3] = (float(any(u.kind == "smoke" and _seg_sphere(ea, eb, (u.x, u.y, u.z), u.radius_units)
+                                     for u in utility)) if a.alive and b.alive else np.nan)
             pr[i, j, 4] = float(a.side == b.side)
     return pr
 
@@ -132,7 +152,9 @@ def _util(kind: str, spec, tick: int) -> tuple[int, UtilityToken]:
     else:
         x, y, z, owner = spec
         start, radius = 4500, None
-    if radius is None:
+    if radius == "unknown":                       # a fire with no extent (awpy's real-demo shape)
+        radius = None
+    elif radius is None:
         radius = {"smoke": SMOKE_R, "fire": FIRE_R}.get(kind)
     tok = UtilityToken(kind=kind, x=float(x), y=float(y), z=float(z),
                        time_left_s=max(0.0, NOMINAL[kind] - (tick - start) / TICK_RATE),
@@ -149,7 +171,8 @@ def make_snapshot(alive_ct: int = 5, alive_t: int = 5, *, dead=(), tick: int = B
                   kinds=("grid",)) -> Snapshot:
     """A Snapshot that passes `validate()`. Dead players: the last `5 - alive_*` of each
     side plus every id in `dead`. Utility specs are `(x, y, z, owner)` tuples or dicts
-    with `x, y, z, owner, start_tick, radius`."""
+    with `x, y, z, owner, start_tick, radius` (`radius: "unknown"` = no extent, token
+    radius None)."""
     rng = random.Random(seed)
     dead = set(dead) | set(CT_IDS[alive_ct:]) | set(T_IDS[alive_t:])
     blind, kills, damage = blind or {}, kills or {}, damage or {}
@@ -194,13 +217,16 @@ def make_snapshot(alive_ct: int = 5, alive_t: int = 5, *, dead=(), tick: int = B
             has_defuser=int(pid in (101, 102)), has_c4=int(pid == c4 and not planted),
             weapon_class="rifle", n_smoke=1, n_flash=1, n_he=0, n_molly=0, n_decoy=0,
             flash_duration_remaining=float(blind.get(pid, 0.0)),
-            in_smoke=int(any(u.kind == "smoke" and _inside(u, pos) for u in utility)),
-            on_fire=int(any(u.kind == "fire" and _inside(u, pos) for u in utility)),
+            in_smoke=_inside_flag(utility, "smoke", pos),
+            on_fire=_inside_flag(utility, "fire", pos),
             money=800.0 + 10 * (pid % 100), equipment_value=float(equipment.get(pid, 4700.0 if pid < 200 else 4500.0)),
             spotted_by_count=0, heard_enemy=0))
 
     def tot(side, field):
         return float(sum(getattr(p, field) for p in players if p.side == side and p.alive))
+
+    def roster_money(side):           # the builder's definition: every account, dead included
+        return float(sum(800.0 + 10 * (pid % 100) for pid in (CT_IDS if side == "ct" else T_IDS)))
 
     into = BASE_INTO_S + (tick - BASE_TICK) / TICK_RATE
     since = (tick - plant_tick) / TICK_RATE if planted else None
@@ -215,7 +241,7 @@ def make_snapshot(alive_ct: int = 5, alive_t: int = 5, *, dead=(), tick: int = B
         alive_ct=sum(p.alive for p in players if p.side == "ct"),
         alive_t=sum(p.alive for p in players if p.side == "t"),
         equip_ct=tot("ct", "equipment_value"), equip_t=tot("t", "equipment_value"),
-        money_ct=tot("ct", "money"), money_t=tot("t", "money"),
+        money_ct=roster_money("ct"), money_t=roster_money("t"),
         loss_streak_ct=0, loss_streak_t=1, score_ct=3, score_t=3, round_num=ROUND, half=1,
         is_overtime=0, n_active_smokes=sum(u.kind == "smoke" for u in utility),
         n_active_fires=sum(u.kind == "fire" for u in utility))
