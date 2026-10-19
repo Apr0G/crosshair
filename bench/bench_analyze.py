@@ -79,14 +79,15 @@ def _stage_seconds(timings: dict, value_stage: str) -> dict[str, float | None]:
     return out
 
 
-def measure_golden(demo: Path, device: str, model_dir: Path | None, stub: bool) -> dict[str, float | None]:
+def measure_golden(demo: Path, device: str, model_dir: Path | None, stub: bool,
+                   value_dirs: tuple | None = None) -> dict[str, float | None]:
     import tempfile
     from engine import analyze, config
     pred = analyze.stub_predictor() if stub else None
     with tempfile.TemporaryDirectory() as tmp:
         res = analyze.analyze_demo(demo, tier="pro", out_dir=Path(tmp) / "report", model_dir=model_dir,
                                    device="cuda" if device == "gpu" else "cpu", cfg=config.load(),
-                                   allow_unadopted=True, predictor=pred, write_db=False)
+                                   allow_unadopted=True, predictor=pred, write_db=False, value_dirs=value_dirs)
     return _stage_seconds(res.timings, res.value_stage)
 
 
@@ -122,6 +123,7 @@ def evaluate(measured: dict[str, float | None], budget: dict, device: str) -> tu
     done    = [m for m in measured.values() if m is not None]
     total_b = float(budget["total"][device])
     ceiling = float(budget["hard_ceiling"][device])
+    partial = any(measured.get(st) is None for st in STAGES)   # a stage not timed: the total is partial (MED-28)
     if not done:
         rows.append(("total", total_b, None, None, "n/a"))
     else:
@@ -129,6 +131,8 @@ def evaluate(measured: dict[str, float | None], budget: dict, device: str) -> tu
         status = "FAIL" if total > ceiling else "over" if total > total_b else "ok"
         if status == "FAIL":
             failures.append(f"total: {total:.1f}s > hard ceiling {ceiling:.0f}s ({device})")
+        if partial:
+            status += " (partial: " + ", ".join(st for st in STAGES if measured.get(st) is None) + " not timed)"
         rows.append(("total", total_b, total, total / total_b, status))
     return rows, failures
 
@@ -152,7 +156,17 @@ def main(argv: list[str] | None = None) -> int:
                     help="time the synthetic base story with a rule stub (no demo, no model)")
     ap.add_argument("--model-dir", type=Path, default=None, help="win model directory for the golden run")
     ap.add_argument("--stub", action="store_true", help="golden run with the rule stub instead of a model")
+    ap.add_argument("--q-model", default=None, help="Q/B model name or directory: times the value stage too")
+    ap.add_argument("--neighbours", default=None, help="neighbour index name or directory (with --q-model)")
     args = ap.parse_args(argv)
+    if (args.q_model is None) != (args.neighbours is None):
+        print("the value stage needs both --q-model and --neighbours")
+        return 2
+    value_dirs = None
+    if args.q_model:
+        def _dir(x):
+            return Path(x) if Path(x).is_dir() else paths.MODELS_DIR / x
+        value_dirs = (_dir(args.q_model), _dir(args.neighbours))
 
     budget = load_budget()
     if args.synthetic:
@@ -166,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.model_dir is None and not args.stub:
             print("no model: pass --model-dir DIR (or --stub to time everything but a real predict)")
             return 2
-        measured = measure_golden(demo, args.device, args.model_dir, args.stub)
+        measured = measure_golden(demo, args.device, args.model_dir, args.stub, value_dirs)
 
     rows, failures = evaluate(measured, budget, args.device)
     print_table(rows, args.device, float(budget["hard_ceiling"][args.device]))
@@ -175,7 +189,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         out = paths.BENCH_DIR / f"analyze_{date.today().isoformat()}.json"
         write(out, {s: m for s, m in measured.items() if m is not None},
-              extra={"device": args.device, "failures": failures, "stub": bool(args.stub)})
+              extra={"device": args.device, "failures": failures, "stub": bool(args.stub),
+                     "value_timed": measured.get("value") is not None,
+                     "partial": [st for st in STAGES if measured.get(st) is None]})
         print(f"\n  wrote {out}")
     if failures:
         print("\n  over budget:\n    " + "\n    ".join(failures))

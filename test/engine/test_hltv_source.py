@@ -155,8 +155,8 @@ def test_server() -> None:
         out_dir = TMP / "out"
         (info, files), out = _quiet(hltv.download_match, f"{base}/matches/1/good", out_dir, throttle=fast)
         names = sorted(p.name for p in files)
-        want  = sorted([f"iem-cologne-2026_{DATE}_natus-vincere-faze_de_mirage.dem",
-                        f"iem-cologne-2026_{DATE}_natus-vincere-faze_de_inferno.dem"])
+        want  = sorted([f"hltv-1_iem-cologne-2026_{DATE}_natus-vincere-faze_de_mirage.dem",
+                        f"hltv-1_iem-cologne-2026_{DATE}_natus-vincere-faze_de_inferno.dem"])
         check("one .dem per map, P1.1.2 names", names == want, str(names))
         check("contents extracted intact",
               (out_dir / want[1]).read_bytes() == DEM1 and (out_dir / want[0]).read_bytes() == DEM2)
@@ -194,8 +194,8 @@ def test_server() -> None:
         n_failed, out = _quiet(ingest.run, hltv, tier="pro", header_reader=hdr,
                                matches=[f"{base}/matches/7/run"], base_url=base, throttle=fast)
         keys = sorted(r["match_key"] for r in db.list_matches())
-        want = sorted([f"blast-fall_{DATE}_natus-vincere-faze_de_mirage",
-                       f"blast-fall_{DATE}_natus-vincere-faze_de_inferno"])
+        want = sorted([f"hltv-7_blast-fall_{DATE}_natus-vincere-faze_de_mirage",
+                       f"hltv-7_blast-fall_{DATE}_natus-vincere-faze_de_inferno"])
         check("both maps registered under their names", n_failed == 0 and keys == want, f"{keys} {out[-200:]}")
         row = db.get_match(want[0])
         check("event/date from the page reach the row, source=hltv, tier=pro",

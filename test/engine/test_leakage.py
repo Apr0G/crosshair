@@ -40,9 +40,9 @@ for tr in (64, 128):
 raw = make_raw_tables("base", 128)
 flipped = leakage.flip_outcome(raw, 1)
 r0, r1 = raw.rounds.row(0, named=True), flipped.rounds.row(0, named=True)
-check("flip_outcome flips winner and reason, moves official_end +5 s, leaves round 2",
-      (r1["winner_side"], r1["end_reason"], r1["official_end_tick"] - r0["official_end_tick"])
-      == ("t", "t_win_elimination", 5 * 128)
+check("flip_outcome flips winner and reason, moves official_end AND end_tick +5 s, leaves round 2",
+      (r1["winner_side"], r1["end_reason"], r1["official_end_tick"] - r0["official_end_tick"],
+       r1["end_tick"] - r0["end_tick"]) == ("t", "t_win_elimination", 5 * 128, 5 * 128)
       and flipped.rounds.row(1, named=True) == raw.rounds.row(1, named=True))
 
 # ── a leaky feature is caught ──
@@ -64,7 +64,15 @@ def leaky_winner(sl, *a, **k):
     return s
 
 
-for name, fn in (("round duration", leaky_duration), ("round winner", leaky_winner)):
+def leaky_end_tick(sl, *a, **k):
+    """The 2026-08-01 bug class: a feature derived from rounds.end_tick (MED-31)."""
+    s = orig(sl, *a, **k)
+    full = _CURRENT["raw"].rounds.filter(_CURRENT["raw"].rounds["round_num"] == s.meta.round_num).row(0, named=True)
+    s.ctx.time_remaining_s = (full["end_tick"] - sl.tick) / sl.tick_rate
+    return s
+
+
+for name, fn in (("round duration", leaky_duration), ("round winner", leaky_winner), ("end_tick", leaky_end_tick)):
     builder.snapshot_at = fn
     try:
         probs = leakage.audit(build_fn, raw)

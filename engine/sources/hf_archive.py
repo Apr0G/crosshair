@@ -194,10 +194,14 @@ def download_waves(files: Iterable[HfFile], dest_dir: Path, repo: str, *,
         for f in wave:
             dest = dest_dir / f"{match_id_for(f.path)}.dem"
             if dest.exists():
-                if f.sha256 is None or _sha256(dest) == f.sha256:
+                # the listing sha is of the stored bytes: comparable only for raw .dem entries
+                # (a decompressed .dem.zst never matches; MED-27)
+                if f.sha256 is None or not f.path.lower().endswith(".dem") or _sha256(dest) == f.sha256:
                     got.append(dest)
                     continue
                 raise FileExistsError(f"{dest} exists with different content; not overwriting")
+            if not _space_ok(dest_dir):              # per file, not per wave: a wave is planned on
+                return got                           # compressed sizes and decompresses to several times that
             url = resolve_url(repo, f.path, repo_type=repo_type, revision=revision, base=base)
             got.append(fetch(url, dest, f.sha256, f.path))
     return got

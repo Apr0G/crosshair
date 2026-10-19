@@ -458,10 +458,125 @@ def med_20() -> None:
         check("adopting a wp model without calibration.json refused", "calibration.json" in str(exc), str(exc))
 
 
+def med_24() -> None:
+    """2026-10-19 MED-24: an exhausted 429 was swallowed by every lookup, so a throttled
+    scrape reported 'no new demos' and exited 0. No network: requests.get is faked."""
+    from engine.sources import faceit_api, scraper
+    os.environ.setdefault("FACEIT_API_KEY", "test-key-for-the-audit-test")     # local only, never printed
+    calls, slept = [], []
+
+    class Resp:
+        status_code = 429
+        headers = {"Retry-After": "3600"}
+        def raise_for_status(self): pass
+        def json(self): return {}
+    real_get, real_sleep = scraper.requests.get, scraper.time.sleep
+    scraper.requests.get = lambda *a, **k: (calls.append(a), Resp())[1]
+    scraper.time.sleep = lambda s: slept.append(s)
+    try:
+        for label, fn in (("_api_get", lambda: scraper._api_get("/x")),
+                          ("get_player_match_ids", lambda: scraper.get_player_match_ids("nick")),
+                          ("faceit_api.get_match_demo_urls", lambda: faceit_api.get_match_demo_urls("m1")),
+                          ("faceit_api.get_match_min_level", lambda: faceit_api.get_match_min_level("m1"))):
+            try:
+                fn()
+                check(f"{label} raises RateLimited on a long Retry-After", False, "no exception")
+            except scraper.RateLimited:
+                check(f"{label} raises RateLimited on a long Retry-After", True)
+        check("no sleep for a Retry-After beyond the ceiling", slept == [] and len(calls) >= 4)
+    finally:
+        scraper.requests.get, scraper.time.sleep = real_get, real_sleep
+
+
+def med_26() -> None:
+    """2026-10-19 MED-26: HLTV names lacked the numeric id (series collided) and
+    per-match failures were swallowed inside the generator."""
+    import contextlib, io
+    from engine import ingest
+    from engine.sources import hltv
+    info = hltv.HltvMatch(match_id="2371234", url="https://www.hltv.org/matches/2371234/x", event="BLAST Fall",
+                          date="2026-05-01", team1="Natus Vincere", team2="FaZe", demo_url=None)
+    other = hltv.HltvMatch(**{**info.__dict__, "match_id": "2371299"})
+    check("two series between the same teams on one day get distinct names",
+          hltv.demo_name(info, "de_mirage") != hltv.demo_name(other, "de_mirage")
+          and hltv.demo_name(info, "de_mirage").startswith("hltv-2371234_"))
+    real = hltv.resolve
+    hltv.resolve = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("page gone"))
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            n_failed = ingest.run(hltv, tier="pro", matches=["2371234"])
+        check("a match the generator could not resolve counts as failed (not 'no new demos')",
+              n_failed == 1 and "hltv-2371234" in buf.getvalue() and "no new demos" not in buf.getvalue(),
+              buf.getvalue()[-200:])
+    finally:
+        hltv.resolve = real
+
+
+def med_27() -> None:
+    """2026-10-19 MED-27: HF waves checked free space once per wave; a re-run over a
+    compressed entry compared the listing sha with the decompressed file and raised."""
+    from engine.sources import hf_archive as hf
+    d = TMP / "m27"; d.mkdir()
+    space_calls, fetched = [], []
+    real_space, real_fetch, real_url = hf._space_ok, hf.fetch, hf.resolve_url
+    hf._space_ok = lambda p: (space_calls.append(p), True)[1]
+    hf.fetch = lambda url, dest, sha, stored: (fetched.append(stored), Path(dest).write_bytes(b"demo" * 10), Path(dest))[2]
+    hf.resolve_url = lambda *a, **k: "https://example.invalid/x"
+    try:
+        f = hf.HfFile(path="2026-08/de_mirage/a.dem.zst", size=40, sha256="f" * 64, map="de_mirage", month="2026-08")
+        first = hf.download_waves([f], d, "r/x")
+        second = hf.download_waves([f], d, "r/x")
+        check("a compressed entry is fetched once and reused on a re-run (sha of the stored bytes not compared)",
+              len(fetched) == 1 and first == second and first[0].is_file(), str(fetched))
+        check("free space is checked before every file, not only per wave", len(space_calls) >= 2, str(len(space_calls)))
+        raw = hf.HfFile(path="2026-08/de_mirage/b.dem", size=40, sha256="0" * 64, map="de_mirage", month="2026-08")
+        hf.download_waves([raw], d, "r/x")
+        try:
+            hf.download_waves([raw], d, "r/x")
+            check("a raw .dem whose sha differs from the listing still refuses to be overwritten", False)
+        except FileExistsError:
+            check("a raw .dem whose sha differs from the listing still refuses to be overwritten", True)
+    finally:
+        hf._space_ok, hf.fetch, hf.resolve_url = real_space, real_fetch, real_url
+
+
+def med_28() -> None:
+    """2026-10-19 MED-28: the golden benchmark never timed the value stage and the total
+    read as complete."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("bench_analyze", ROOT / "bench" / "bench_analyze.py")
+    import sys as _sys
+    _sys.path.insert(0, str(ROOT / "bench"))
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    budget = mod.load_budget()
+    measured = {st: 1.0 for st in mod.STAGES}
+    measured["value"] = None
+    rows, _ = mod.evaluate(measured, budget, "cpu")
+    total = [r for r in rows if r[0] == "total"][0]
+    check("a total without the value stage is marked partial", "partial" in total[4] and "value" in total[4], total[4])
+    full_rows, _ = mod.evaluate({st: 1.0 for st in mod.STAGES}, budget, "cpu")
+    check("a total with every stage is not marked partial", "partial" not in [r for r in full_rows if r[0] == "total"][0][4])
+
+
+def med_29() -> None:
+    """2026-10-19 MED-29: a second review cycle with the same seed re-selected the same rounds."""
+    import json
+    from engine.evaluation import review as rv
+    root = TMP / "m29"
+    for i, (m, r) in enumerate([("ma", 3), ("mb", 7)], 1):
+        d = root / f"review_round_{i}"; d.mkdir(parents=True)
+        (d / rv.CASE_NAME).write_text(json.dumps({"index": i, "match_key": m, "round_num": r}), encoding="utf-8")
+    check("exclusions_from reads every earlier case", sorted(rv.exclusions_from([root])) == [("ma", 3), ("mb", 7)])
+    src = (ROOT / "engine" / "evaluation" / "review.py").read_text(encoding="utf-8")
+    check("main() passes the exclusions to select_review_rounds", "select_review_rounds(frame, a.n, a.seed, exclude=exclude)" in src)
+
+
 # ── runner ────────────────────────────────────────────────────────────────────
 
 ITEMS = [crit_01, high_01, high_02, high_03, high_04, high_05, high_06, med_02, med_04, med_06,
-         med_07, med_08, med_09, med_10, med_14, med_17, med_18_19, med_20]
+         med_07, med_08, med_09, med_10, med_14, med_17, med_18_19, med_20,
+         med_24, med_26, med_27, med_28, med_29]
 
 section("audit items (docs/reviews)")
 for fn in ITEMS:

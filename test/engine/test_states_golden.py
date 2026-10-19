@@ -53,23 +53,25 @@ def main() -> int:
     if demo is None:
         print("  golden demo file missing; see test_golden_present.py")
         return 2
-    try:
-        from engine.parse.awpy3_parser import parse
-    except ImportError:
-        print("  engine.parse.awpy3_parser.parse not available yet (P2.5)")
-        return 2
-    try:
-        from engine.maps import assets as map_assets
-        from engine.maps import callouts as map_callouts
-        from engine.maps import version as map_version
-        from engine.state.geometry import MapGeometry
-        raw = parse(demo)
-        a   = map_assets.ensure(raw.meta["map"])
-        geo = MapGeometry.from_assets(a, map_callouts.load(raw.meta["map"]),
-                                      map_version.detect(raw.meta, raw.meta["map"]))
-    except Exception as e:  # missing assets / callouts are prerequisites, not failures
+    from engine.parse.awpy3_parser import parse
+    from engine.parse.schema import RawTables
+    from engine.maps import assets as map_assets
+    from engine.maps import callouts as map_callouts
+    from engine.maps import version as map_version
+    from engine.state.geometry import MapGeometry
+    tables, meta = parse(demo)                         # parse() returns a tuple (MED-32)
+    raw = RawTables.from_parsed(tables, meta)
+    try:                                               # only missing assets / callouts are prerequisites
+        a = map_assets.ensure(raw.meta["map"])
+        try:
+            cos = map_callouts.load(raw.meta["map"])
+        except (FileNotFoundError, ValueError):
+            cos = []
+    except (map_assets.MapAssetError, FileNotFoundError) as e:
         print(f"  prerequisite missing: {type(e).__name__}: {e}")
         return 2
+    geo = MapGeometry.from_assets(a, cos, map_version.detect({"build_num": raw.meta.get("game_version")},
+                                                             raw.meta["map"]))
     snaps = builder.build(raw, geo, config.load(), match_key="golden", tier="pro", los_cache=False, debug=True)
     got = checksums(snaps)
     if "--write" in sys.argv:

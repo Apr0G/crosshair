@@ -39,6 +39,8 @@ def get_match_demo_urls(match_id: str) -> list[str]:
     """
     try:
         data = scraper._api_get(f"/matches/{match_id}")
+    except scraper.RateLimited:
+        raise                                   # MED-24: a throttled run stops, it does not look empty
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else None
         if status in (401, 403):
@@ -68,6 +70,8 @@ def get_match_min_level(match_id: str) -> int | None:
     """
     try:
         data = scraper._api_get(f"/matches/{match_id}")
+    except scraper.RateLimited:
+        raise
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else None
         if status in (401, 403):

@@ -75,6 +75,8 @@ def main() -> int:
     }
     if zst_body is not None:
         Handler.routes["/ok.dem.zst"] = (200, "application/octet-stream", zst_body, None, None)
+        two_frames = zstd.ZstdCompressor().compress(BODY_RAW) + zstd.ZstdCompressor().compress(BODY_RAW)
+        Handler.routes["/two.dem.zst"] = (200, "application/octet-stream", two_frames, None, None)
 
     port = _free_port()
     srv = HTTPServer(("127.0.0.1", port), Handler)
@@ -109,6 +111,13 @@ def main() -> int:
                       f"{p.stat().st_size} bytes")
             except Exception as e:
                 check("zstd demo is decompressed", False, repr(e))
+
+            try:
+                p = dl("/two.dem.zst", "c2.dem")
+                check("multi-frame zstd (pzstd / concatenated frames) is decompressed whole (MED-25)",
+                      p.exists() and p.read_bytes() == BODY_RAW + BODY_RAW, f"{p.stat().st_size} bytes")
+            except Exception as e:
+                check("multi-frame zstd (pzstd / concatenated frames) is decompressed whole (MED-25)", False, repr(e))
 
             # The old code chose the branch by substring-matching the WHOLE url,
             # including the signed query string. A ".zst" inside a token picked the

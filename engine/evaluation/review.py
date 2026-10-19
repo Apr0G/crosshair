@@ -252,6 +252,15 @@ def read_cases(out_root: Path) -> list[dict]:
     return sorted(cases, key=lambda c: c["index"])
 
 
+def exclusions_from(roots) -> list[tuple[str, int]]:
+    """(match_key, round_num) of every case under the given roots: what a later cycle
+    must not select again (P11.2.4: 20 NEW rounds per cycle; MED-29, 2026-10-19)."""
+    out: list[tuple[str, int]] = []
+    for root in roots:
+        out += [(str(c["match_key"]), int(c["round_num"])) for c in read_cases(Path(root))]
+    return out
+
+
 # ── P11.2.2 review log ────────────────────────────────────────────────────────
 
 def _fmt(v) -> str:
@@ -367,6 +376,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n", type=int, default=DEFAULT_N)
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
     ap.add_argument("--cycle", type=int, default=1)
+    ap.add_argument("--exclude-from", type=Path, action="append", default=None,
+                    help="root(s) of earlier cycles whose rounds must not be selected again "
+                         "(default for --cycle > 1: --out-root itself)")
     ap.add_argument("--parse", type=Path, default=None, help="print the disagree items of a review log")
     a = ap.parse_args(argv)
     if a.parse is not None:
@@ -386,7 +398,9 @@ def main(argv: list[str] | None = None) -> int:
     frame = enrich(pl.read_parquet(a.scored),
                    pl.read_parquet(a.actions) if a.actions and a.actions.is_file() else None,
                    pl.read_parquet(a.states) if a.states and a.states.is_file() else None)
-    sel = select_review_rounds(frame, a.n, a.seed)
+    roots = a.exclude_from if a.exclude_from is not None else ([a.out_root] if a.cycle > 1 else [])
+    exclude = exclusions_from(roots)
+    sel = select_review_rounds(frame, a.n, a.seed, exclude=exclude)
     try:
         dirs = write_review_set(frame, a.out_root, selection=sel)
         cases = [json.loads((d / CASE_NAME).read_text(encoding="utf-8")) for d in dirs]

@@ -26,7 +26,8 @@ _FLIP_SIDE = {"ct": "t", "t": "ct"}
 
 def flip_outcome(raw: RawTables, round_num: int, shift_s: float = 5.0) -> RawTables:
     """Copy of `raw` with round `round_num`'s winner flipped, its end_reason swapped to
-    the other side's, and official_end_tick moved by +shift_s."""
+    the other side's, and both end_tick and official_end_tick moved by +shift_s (the
+    2026-08-01 time_remaining leak read end_tick; MED-31, 2026-10-19)."""
     tr = int(raw.meta["tick_rate"])
     is_r = pl.col("round_num") == round_num
     reason = pl.col("end_reason")
@@ -38,7 +39,9 @@ def flip_outcome(raw: RawTables, round_num: int, shift_s: float = 5.0) -> RawTab
           .otherwise(pl.col("winner_side")).alias("winner_side"),
         pl.when(is_r).then(flipped_reason).otherwise(reason).alias("end_reason"),
         pl.when(is_r).then(pl.col("official_end_tick") + int(round(shift_s * tr)))
-          .otherwise(pl.col("official_end_tick")).alias("official_end_tick"))
+          .otherwise(pl.col("official_end_tick")).alias("official_end_tick"),
+        pl.when(is_r).then(pl.col("end_tick") + int(round(shift_s * tr)))
+          .otherwise(pl.col("end_tick")).alias("end_tick"))
     frames = raw.frames()
     frames["rounds"] = rounds
     return RawTables(**frames, meta=dict(raw.meta))

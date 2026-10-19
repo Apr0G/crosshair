@@ -168,7 +168,11 @@ def map_from_member(name: str) -> str:
 
 
 def demo_name(info: HltvMatch, map_name: str) -> str:
-    return f"{slug(info.event)}_{info.date or 'unknown'}_{slug(info.team1)}-{slug(info.team2)}_{map_name}.dem"
+    """`hltv-<numeric id>_<event>_<date>_<team1>-<team2>_<map>.dem`. The HLTV id makes two
+    series between the same teams on one day distinct (MED-26, 2026-10-19); the rest
+    keeps the file readable."""
+    return (f"hltv-{info.match_id}_{slug(info.event)}_{info.date or 'unknown'}_"
+            f"{slug(info.team1)}-{slug(info.team2)}_{map_name}.dem")
 
 
 def unpack(archive: Path, dest_dir: Path, info: HltvMatch) -> list[Path]:
@@ -249,6 +253,8 @@ def download_match(match: str, dest_dir: Path, *, base_url: str = HLTV_BASE,
 
 _PENDING: set[Path] = set()           # files this module unpacked and has not handed out
 _META:    dict[str, dict] = {}
+FAILURES: list[tuple[str, str]] = []  # (match id, redacted error) of matches the generator could not resolve
+                                      # or download; `ingest.run` adds them to its failed count (MED-26)
 
 
 def iter_unprocessed_demos(matches=(), base_url: str = HLTV_BASE, work_dir: Path | None = None,
@@ -260,6 +266,7 @@ def iter_unprocessed_demos(matches=(), base_url: str = HLTV_BASE, work_dir: Path
     pass skip_seen=False to download it again (maps already processed are still skipped)."""
     own  = work_dir is None
     work = Path(tempfile.mkdtemp(prefix="hltv_")) if own else Path(work_dir)
+    FAILURES.clear()
     try:
         for match in matches:
             try:
@@ -269,7 +276,13 @@ def iter_unprocessed_demos(matches=(), base_url: str = HLTV_BASE, work_dir: Path
                     continue
                 files = download_resolved(info, work, throttle)
             except Exception as e:
-                print(f"    hltv match {redact_url(str(match))} failed: {redact_text(e, str(match))}")
+                msg = redact_text(f"{type(e).__name__}: {e}", str(match))
+                print(f"    hltv match {redact_url(str(match))} failed: {msg}")
+                try:
+                    mid = f"hltv-{match_url(str(match), base_url)[0]}"
+                except ValueError:
+                    mid = f"hltv-{slug(str(match))[:40]}"
+                FAILURES.append((mid, msg))
                 continue
             for f in files:
                 mid = f.stem

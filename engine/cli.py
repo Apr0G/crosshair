@@ -665,8 +665,14 @@ def cmd_scrape(a, cfg, lg, run_id: str, timings: dict) -> int:
     kw = {k: v for k, v in (("min_level", a.min_level), ("min_elo", a.min_elo), ("region", a.region))
           if v is not None}
     t0 = time.perf_counter()
-    failed = ingest.run(a.source, a.max, tier=a.tier, **kw)
-    timings["scrape"] = time.perf_counter() - t0
+    try:
+        failed = ingest.run(a.source, a.max, tier=a.tier, **kw)
+    except Exception as exc:
+        if type(exc).__name__ == "RateLimited":          # engine.sources.scraper.RateLimited (MED-24)
+            raise CLIError(f"scrape stopped: {exc}", 1) from None
+        raise
+    finally:
+        timings["scrape"] = time.perf_counter() - t0
     return 1 if failed else 0
 
 

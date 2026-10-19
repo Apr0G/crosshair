@@ -9,6 +9,9 @@ release cached (skipped otherwise).
 """
 import sys
 
+import json
+from pathlib import Path
+
 from _harness import check, section, skip, summary
 
 from engine.maps import assets, grid
@@ -31,11 +34,18 @@ def test_synthetic() -> None:
     check("margin and negative coordinates", gm.x0 == -384.0 and gm.cell(-100, -100) is not None)
 
 
+PINNED = Path(__file__).resolve().parent / "fixtures" / "grid_params.json"
+
+
 def test_maps() -> None:
+    """Grid ids are a model vocabulary input: the per-map parameters (x0, y0, n_cols,
+    n_rows) are pinned in fixtures/grid_params.json for the cached release and must not
+    drift (MED-30, 2026-10-19). `--write` pins the current values after a deliberate change."""
     section("nav-mesh grids")
     if not assets.release_dir().is_dir():
         skip("per-map grids", "awpy-data release not cached")
         return
+    got = {}
     for m in assets.ACTIVE_POOL:
         a = assets.ensure(m)
         n = grid.n_cells(a)
@@ -43,9 +53,19 @@ def test_maps() -> None:
         ids = [grid.cell(a, x, y) for x, y in zip(df["centroid_x"], df["centroid_y"])]
         ok = all(i is not None and 0 <= i < n for i in ids)
         check(f"{m}: every centroid in [0, {n})", ok)
-        check(f"{m}: grid is stable", grid.grid_for(a) == grid.from_extents(
-            float(df["centroid_x"].min()), float(df["centroid_y"].min()),
-            float(df["centroid_x"].max()), float(df["centroid_y"].max())))
+        g = grid.grid_for(a)
+        got[m] = {"release": str(a.release), "x0": g.x0, "y0": g.y0, "n_cols": g.n_cols, "n_rows": g.n_rows}
+    if "--write" in sys.argv:
+        PINNED.write_text(json.dumps(got, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"  wrote {PINNED.name}")
+        return
+    if not PINNED.is_file():
+        skip("pinned grid parameters", f"{PINNED.name} not written yet; run with --write")
+        return
+    pinned = json.loads(PINNED.read_text(encoding="utf-8"))
+    for m, params in got.items():
+        check(f"{m}: grid parameters match the pinned {PINNED.name}", pinned.get(m) == params,
+              f"pinned {pinned.get(m)} got {params}")
 
 
 def main() -> int:

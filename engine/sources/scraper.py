@@ -78,12 +78,22 @@ def _api_headers() -> dict:
     return {"Authorization": f"Bearer {key}"}
 
 
+RETRY_AFTER_MAX_S = 900.0            # honour Retry-After up to 15 min; beyond that stop the run
+
+
+class RateLimited(RuntimeError):
+    """The FACEIT Data API kept answering 429, or asked for a longer wait than
+    RETRY_AFTER_MAX_S. Never swallowed by a lookup: the whole run stops (MED-24)."""
+
+
 def _api_get(endpoint: str, params: dict = None, max_retries: int = 4) -> dict:
     """Both source modules go through here, so 429 handling belongs here too.
 
     Previously a 429 raised straight through and every caller's blanket except turned
     it into "this player has no matches" — so crossing the rate limit made the scraper
-    keep going at full speed while silently producing nothing.
+    keep going at full speed while silently producing nothing. Since 2026-10-19 the
+    exhausted case raises `RateLimited`, which the lookups re-raise and `ingest.run`
+    lets through, so a throttled scrape reports a failure instead of "no new demos".
     """
     for attempt in range(max_retries):
         resp = requests.get(f"{API_BASE}{endpoint}", headers=_api_headers(),
@@ -91,16 +101,19 @@ def _api_get(endpoint: str, params: dict = None, max_retries: int = 4) -> dict:
         if resp.status_code == 429:
             hdr = resp.headers.get("Retry-After")
             try:
-                wait = min(float(hdr), 60.0) if hdr else min(2 ** attempt, 60.0)
+                wait = float(hdr) if hdr else min(2 ** attempt, 60.0)
             except (TypeError, ValueError):
                 wait = min(2 ** attempt, 60.0)
+            if wait > RETRY_AFTER_MAX_S:
+                raise RateLimited(f"FACEIT Data API asked to wait {wait:.0f} s on {endpoint}; stopping the run "
+                                  f"instead of hammering the key")
             wait += random.uniform(0, 0.5)   # jitter: don't re-synchronise across runs
             print(f"    rate limited (429) on {endpoint}, backing off {wait:.1f}s ...")
             time.sleep(wait)
             continue
         resp.raise_for_status()
         return resp.json()
-    raise RuntimeError(f"FACEIT Data API still rate-limited after {max_retries} attempts: {endpoint}")
+    raise RateLimited(f"FACEIT Data API still rate-limited after {max_retries} attempts: {endpoint}")
 
 
 def get_leaderboard_players(region: str = "EU", min_elo: int = 2500, max_players: int = 50, start_offset: int = 0) -> list[dict]:
@@ -227,6 +240,8 @@ def get_player_match_ids(nickname: str, limit: int = 20) -> list[str]:
             return []
         matches = _api_get(f"/players/{pid}/history", {"game": "cs2", "limit": limit})
         return [m.get("match_id") or m.get("id") for m in matches.get("items", []) if m.get("match_id") or m.get("id")]
+    except RateLimited:
+        raise                                   # the run must stop, not move to the next player
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else None
         if status in (401, 403):
@@ -465,7 +480,7 @@ def download_demo(demo_url: str, dest: Path) -> Path:
             dctx = zstd.ZstdDecompressor()
             written = 0
             with open(tmp, "rb") as compressed, open(dest, "wb") as out:
-                reader = dctx.stream_reader(compressed)
+                reader = dctx.stream_reader(compressed, read_across_frames=True)   # multi-frame .zst (MED-25)
                 while True:
                     block = reader.read(1024 * 1024)
                     if not block:

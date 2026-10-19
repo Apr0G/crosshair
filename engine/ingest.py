@@ -253,7 +253,11 @@ def run(source_name, max_matches: int | None = None, *, tier: str | None = None,
         if hasattr(src, "close_browser"):
             src.close_browser()
 
-    if attempted == 0:
+    for mid, msg in list(getattr(src, "FAILURES", None) or []):      # a source's own per-match failures
+        print(f"[{mid}] error: {msg}")
+        failed.append((mid, msg))
+
+    if attempted == 0 and not failed:
         print("no new demos found.")
     print(f"\ndone: {n_ok} ok, {len(failed)} failed, of {attempted} attempted")
     if failed:
