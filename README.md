@@ -24,6 +24,29 @@ millions of decisions automatically.
 
 ---
 
+## Engine v2
+
+Since 2026-10-19 Crosshair is being rebuilt as the `engine/` package: a neural
+win-probability model over per-player state, Shapley attribution over
+state-editing counterfactuals (so two actions on the same tick are split correctly),
+and a decision / execution split of every action against what pros usually do there.
+The plan is `docs/ENGINE_PLAN.md`; progress and what still needs data is
+`docs/ENGINE_PROGRESS.md`. The legacy `src/` pipeline that the rest of this README
+describes was removed (Amendment 1 of the plan); its numbers below are from the
+reference run and stay as they are.
+
+```
+.venv\Scripts\python.exe -m engine.cli --help            # commands (docs/ENGINE_CLI.md)
+.venv\Scripts\python.exe test\run_all.py                 # engine test suite (plain scripts)
+```
+
+Setup: `docs/ENGINE_ENV.md` (Python 3.12 venv, `requirements-engine.txt`, torch from
+AMD's ROCm wheels). Operations and retraining: `docs/ENGINE_OPS.md`. Models and the
+adoption rules: `docs/ENGINE_MODELS.md`. Demo sources: `docs/DATA_SOURCES.md`. No
+trained model or pro demo exists yet.
+
+---
+
 ## What you get after running the pipeline
 
 - A SQLite database of high-ELO matches scraped from Faceit

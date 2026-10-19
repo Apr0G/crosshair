@@ -1,0 +1,262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crosshair.local/engine/report/schema/v1.json",
+  "title": "Crosshair engine report (report.json)",
+  "description": "P10.2.1. Versioned by report_schema_version; a breaking change bumps it and engine/report/writer.py REPORT_SCHEMA_VERSION together. Unknown numbers are null, never 0. Player ids are hashed (p_<hex>) unless the run used --show-ids, which adds steamid and name.",
+  "type": "object",
+  "required": ["report_schema_version", "meta", "rounds", "players", "teams", "warnings"],
+  "additionalProperties": false,
+  "properties": {
+    "report_schema_version": {"const": 1},
+    "meta":     {"$ref": "#/$defs/meta"},
+    "rounds":   {"type": "array", "items": {"$ref": "#/$defs/round"}},
+    "players":  {"type": "array", "items": {"$ref": "#/$defs/player"}},
+    "teams":    {"type": "array", "items": {"$ref": "#/$defs/team"}},
+    "warnings": {"type": "array", "items": {"$ref": "#/$defs/warning"}}
+  },
+  "$defs": {
+    "num":     {"type": ["number", "null"]},
+    "int":     {"type": ["integer", "null"]},
+    "str":     {"type": ["string", "null"]},
+    "side":    {"enum": ["ct", "t"]},
+    "verdict": {"enum": ["good", "neutral", "bad", null]},
+    "player_id": {"type": "string", "pattern": "^p_[0-9a-f]{10}$"},
+
+    "meta": {
+      "type": "object",
+      "required": ["match_key", "map", "map_version", "tier", "config_hash", "run_id",
+                   "created_at", "timings", "model_versions", "value_stage"],
+      "additionalProperties": false,
+      "properties": {
+        "match_key":      {"type": "string"},
+        "map":            {"$ref": "#/$defs/str"},
+        "map_version":    {"$ref": "#/$defs/str"},
+        "tier":           {"enum": ["pro", "faceit_10", "faceit_8_9", "other"]},
+        "source_tier":    {"$ref": "#/$defs/str"},
+        "teams": {
+          "type": "object",
+          "properties": {"ct_start": {"$ref": "#/$defs/str"}, "t_start": {"$ref": "#/$defs/str"}}
+        },
+        "date":           {"$ref": "#/$defs/str"},
+        "tick_rate":      {"$ref": "#/$defs/int"},
+        "n_rounds":       {"type": "integer", "minimum": 0},
+        "config_hash":    {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "run_id":         {"type": "string"},
+        "created_at":     {"type": "string"},
+        "timings":        {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}},
+        "model_versions": {"type": "object", "additionalProperties": {"$ref": "#/$defs/str"}},
+        "value_stage":    {"enum": ["done", "skipped"]},
+        "show_ids":       {"type": "boolean"}
+      }
+    },
+
+    "round": {
+      "type": "object",
+      "required": ["round_num", "wp_curve", "windows", "actions", "clock_ct", "clock_t",
+                   "conservation_residual"],
+      "properties": {
+        "round_num":   {"type": "integer"},
+        "winner_side": {"enum": ["ct", "t", null]},
+        "end_reason":  {"$ref": "#/$defs/str"},
+        "w_start":     {"type": "number"},
+        "w_end":       {"type": "number"},
+        "wp_curve": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["tick", "W"],
+            "properties": {
+              "tick": {"type": "integer"},
+              "t_s":  {"$ref": "#/$defs/num"},
+              "W":    {"type": "number", "minimum": 0, "maximum": 1}
+            }
+          }
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["window_id", "start_tick", "end_tick", "member_action_ids"],
+            "properties": {
+              "window_id":         {"type": "string"},
+              "start_tick":        {"type": "integer"},
+              "end_tick":          {"type": "integer"},
+              "member_action_ids": {"type": "array", "items": {"type": "string"}},
+              "sampled":           {"type": "boolean"},
+              "failed":            {"type": "boolean"}
+            }
+          }
+        },
+        "actions":  {"type": "array", "items": {"$ref": "#/$defs/action"}},
+        "clock_ct": {"type": "number"},
+        "clock_t":  {"type": "number"},
+        "conservation_residual": {"type": "number"},
+        "stats":    {"type": "object"}
+      }
+    },
+
+    "action": {
+      "type": "object",
+      "required": ["action_id", "type", "actor_side", "V", "V_direct", "V_enabler", "V_movement",
+                   "Q", "B", "D", "R", "X", "method", "residual", "flags"],
+      "properties": {
+        "action_id":         {"type": "string"},
+        "round_num":         {"type": "integer"},
+        "type":              {"type": "string"},
+        "subtype":           {"$ref": "#/$defs/str"},
+        "actor":             {"oneOf": [{"$ref": "#/$defs/player_id"}, {"type": "null"}]},
+        "steamid":           {"$ref": "#/$defs/str"},
+        "name":              {"$ref": "#/$defs/str"},
+        "actor_side":        {"$ref": "#/$defs/side"},
+        "tick":              {"$ref": "#/$defs/int"},
+        "t_s":               {"$ref": "#/$defs/num"},
+        "window_start_tick": {"$ref": "#/$defs/int"},
+        "window_end_tick":   {"$ref": "#/$defs/int"},
+        "where":             {"$ref": "#/$defs/str"},
+        "synthetic":         {"type": "boolean"},
+        "V":                 {"type": "number"},
+        "V_direct":          {"type": "number"},
+        "V_enabler":         {"type": "number"},
+        "V_movement":        {"type": "number"},
+        "Q":                 {"$ref": "#/$defs/num"},
+        "B":                 {"$ref": "#/$defs/num"},
+        "D":                 {"$ref": "#/$defs/num"},
+        "R":                 {"$ref": "#/$defs/num"},
+        "X":                 {"$ref": "#/$defs/num"},
+        "verdict_decision":  {"$ref": "#/$defs/verdict"},
+        "verdict_execution": {"$ref": "#/$defs/verdict"},
+        "descriptor_key":    {"$ref": "#/$defs/str"},
+        "method":            {"enum": ["exact", "sampled", "loo", null]},
+        "n_coalition":       {"$ref": "#/$defs/int"},
+        "residual":          {"$ref": "#/$defs/num"},
+        "flags":             {"type": "array", "items": {"type": "string"}},
+        "enablers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "share", "V"],
+            "properties": {
+              "kind":      {"type": "string"},
+              "action_id": {"$ref": "#/$defs/str"},
+              "actor":     {"oneOf": [{"$ref": "#/$defs/player_id"}, {"type": "null"}]},
+              "type":      {"$ref": "#/$defs/str"},
+              "share":     {"$ref": "#/$defs/num"},
+              "V":         {"type": "number"}
+            }
+          }
+        },
+        "panel": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["ref", "n_used", "top"],
+              "properties": {
+                "ref":     {"type": "string"},
+                "k":       {"type": "integer"},
+                "n_used":  {"type": "integer", "minimum": 0},
+                "n_other": {"type": "integer", "minimum": 0},
+                "top": {
+                  "type": "array",
+                  "maxItems": 20,
+                  "items": {
+                    "type": "object",
+                    "required": ["key", "n", "freq", "mean_V"],
+                    "properties": {
+                      "key":    {"type": "string"},
+                      "n":      {"type": "integer", "minimum": 0},
+                      "freq":   {"type": "number", "minimum": 0, "maximum": 1},
+                      "mean_V": {"type": "number"},
+                      "mean_Q": {"$ref": "#/$defs/num"}
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+
+    "player": {
+      "type": "object",
+      "required": ["player", "n", "V_total", "by_type"],
+      "properties": {
+        "player":  {"$ref": "#/$defs/player_id"},
+        "steamid": {"$ref": "#/$defs/str"},
+        "name":    {"$ref": "#/$defs/str"},
+        "sides":   {"type": "array", "items": {"$ref": "#/$defs/side"}},
+        "n":       {"type": "integer", "minimum": 0},
+        "V_total": {"type": "number"},
+        "by_type": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "n", "V"],
+            "properties": {
+              "type": {"type": "string"},
+              "n":    {"type": "integer", "minimum": 0},
+              "V":    {"type": "number"}
+            }
+          }
+        },
+        "by_class": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["class", "n"],
+            "properties": {
+              "class":   {"type": "string"},
+              "n":       {"type": "integer", "minimum": 0},
+              "D_mean":  {"$ref": "#/$defs/num"},
+              "D_tilde": {"$ref": "#/$defs/num"},
+              "D_lo":    {"$ref": "#/$defs/num"},
+              "D_hi":    {"$ref": "#/$defs/num"},
+              "X_mean":  {"$ref": "#/$defs/num"},
+              "X_tilde": {"$ref": "#/$defs/num"},
+              "X_lo":    {"$ref": "#/$defs/num"},
+              "X_hi":    {"$ref": "#/$defs/num"}
+            }
+          }
+        }
+      }
+    },
+
+    "team": {
+      "type": "object",
+      "required": ["side", "clock_total", "V_total"],
+      "properties": {
+        "side":        {"$ref": "#/$defs/side"},
+        "name":        {"$ref": "#/$defs/str"},
+        "clock_total": {"type": "number"},
+        "V_total":     {"type": "number"},
+        "buys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["round_num", "action_id", "type", "V"],
+            "properties": {
+              "round_num": {"type": "integer"},
+              "action_id": {"type": "string"},
+              "type":      {"type": "string"},
+              "actor":     {"oneOf": [{"$ref": "#/$defs/player_id"}, {"type": "null"}]},
+              "loadout":   {"$ref": "#/$defs/str"},
+              "V":         {"type": "number"}
+            }
+          }
+        }
+      }
+    },
+
+    "warning": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code":      {"type": "string", "pattern": "^[a-z0-9_]+$"},
+        "message":   {"type": "string"},
+        "round_num": {"$ref": "#/$defs/int"},
+        "action_id": {"$ref": "#/$defs/str"}
+      }
+    }
+  }
+}

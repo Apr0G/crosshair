@@ -1,0 +1,17 @@
+# Known map layout versions (P2.4.2), read by engine/maps/version.py.
+#
+# A map's position embeddings are keyed by `map_version` = "<map>@<version>". When
+# Valve reworks a map's layout, add an entry here so demos before and after the
+# change get different keys (and retrain, P12.2). Matching is on the demo header's
+# `build_num` (the game build); bounds are inclusive and null means open-ended.
+#
+#   maps:
+#     de_example:
+#       - {version: "2025-07-rework", min_build: 10400, max_build: null}
+#       - {version: "original",       min_build: null,  max_build: 10399}
+#
+# No rework has been recorded yet, so every demo maps to "<map>@unknown" (logged once
+# per map + build). That is correct until the first rework entry is added.
+
+default: unknown
+maps: {}

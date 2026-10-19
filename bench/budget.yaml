@@ -1,0 +1,18 @@
+# Time budget for `bench/bench_analyze.py` on the golden demo (P0.6.2, P10.3.1).
+# Seconds per stage, end to end including parsing. `bench_analyze.py --assert` fails
+# when an implemented stage exceeds its budget by more than 50%, or the measured total
+# exceeds the hard ceiling (condition C3). Mirrors `bench:` in engine/config.yaml;
+# test/engine/test_config.py fails if the two drift apart.
+# When over budget, turn the knobs in the P10.3.2 order and record each change here.
+
+stages:
+  parse:       {gpu: 15, cpu: 15}
+  states:      {gpu: 8,  cpu: 8}
+  actions:     {gpu: 3,  cpu: 3}
+  predict:     {gpu: 5,  cpu: 30}
+  attribution: {gpu: 15, cpu: 90}
+  value:       {gpu: 5,  cpu: 20}
+  report:      {gpu: 4,  cpu: 4}
+total:         {gpu: 55, cpu: 170}
+hard_ceiling:  {gpu: 120, cpu: 300}
+over_budget_factor: 1.5        # a stage fails --assert above budget * this

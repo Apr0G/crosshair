@@ -1,0 +1,63 @@
+# Weapon class vocabulary (P3.2.2). Read by engine/state/players.py.
+#
+# `classes` lists CS2 item short names (the name without the `weapon_` prefix). awpy /
+# demoparser2 emit them in two forms: item class names in inventory / active_weapon
+# (`weapon_ak47`) and short names in kills / damages / weapon_fire (`ak47`); both forms
+# are registered for every name below. `aliases` maps display names (some parser
+# versions emit `AK-47`) and other spellings onto a short name; matching is
+# case-insensitive. Any name starting with `knife` or `bayonet` (with or without the
+# prefix) is a knife skin and maps to `knife`. Anything else maps to `unknown` and is
+# logged once per process.
+#
+# The class list is fixed (changing it changes the model's input vocabulary):
+#   rifle, sniper, smg, shotgun, lmg, pistol, knife, grenade, zeus, c4, unknown
+
+classes:
+  rifle:   [ak47, m4a1, m4a1_silencer, m4a1_silencer_off, famas, galilar, aug, sg556]
+  sniper:  [awp, ssg08, g3sg1, scar20]
+  smg:     [mac10, mp9, mp7, mp5sd, ump45, p90, bizon]
+  shotgun: [nova, xm1014, sawedoff, mag7]
+  lmg:     [m249, negev]
+  pistol:  [glock, hkp2000, usp_silencer, usp_silencer_off, p250, fiveseven, tec9, cz75a,
+            deagle, revolver, elite]
+  knife:   [knife, knife_t, knifegg, knife_ghost, bayonet]
+  grenade: [hegrenade, flashbang, smokegrenade, molotov, incgrenade, decoy, inferno]
+  zeus:    [taser]
+  c4:      [c4, planted_c4]
+
+aliases:
+  ak-47: ak47
+  m4a4: m4a1
+  m4a1-s: m4a1_silencer
+  galil ar: galilar
+  galil: galilar
+  sg 553: sg556
+  sg553: sg556
+  ssg 08: ssg08
+  scar-20: scar20
+  mac-10: mac10
+  mp5-sd: mp5sd
+  ump-45: ump45
+  pp-bizon: bizon
+  sawed-off: sawedoff
+  mag-7: mag7
+  glock-18: glock
+  p2000: hkp2000
+  usp-s: usp_silencer
+  five-seven: fiveseven
+  tec-9: tec9
+  cz75-auto: cz75a
+  cz75: cz75a
+  desert eagle: deagle
+  r8 revolver: revolver
+  dual berettas: elite
+  high explosive grenade: hegrenade
+  he grenade: hegrenade
+  smoke grenade: smokegrenade
+  incendiary grenade: incgrenade
+  incendiary: incgrenade
+  decoy grenade: decoy
+  zeus x27: taser
+  zeus: taser
+  c4 explosive: c4
+  knife_ct: knife

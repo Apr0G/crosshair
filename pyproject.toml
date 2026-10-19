@@ -1,21 +1,30 @@
-# Metadata only. requirements.txt is the single source of truth for dependencies —
-# this file reads from it rather than keeping a second list, because the two had
-# already drifted (pyproject was missing lightgbm, scikit-learn and requests).
+# Metadata only. requirements-engine.txt is the single source of truth for dependencies
+# (Amendment 1: one venv, Python 3.12, at .venv) — this file reads from it rather than
+# keeping a second list. torch is installed separately from AMD's ROCm wheels and is
+# not listed there; see docs/ENGINE_ENV.md.
 #
-# There is deliberately no [project.scripts] entry: it used to declare
-# `crosshair = "crosshair.main:main"`, but src/ is a flat set of modules, not a
-# `crosshair` package, so the generated console script failed with ModuleNotFoundError.
-# Run the CLI as `.venv/bin/python src/main.py <subcommand>`.
+# The console script points at the `engine` package (a real package, unlike the old
+# flat src/ modules), so `crosshair <command>` and `python -m engine.cli <command>` are
+# the same entry point.
 
 [project]
 name            = "crosshair"
 version         = "0.1.0"
 description     = "Impact-attribution engine for Counter-Strike 2 demos"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dynamic         = ["dependencies"]
 
+[project.scripts]
+crosshair = "engine.cli:main"
+
 [tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+dependencies = { file = ["requirements-engine.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["engine*"]
+
+[tool.setuptools.package-data]
+engine = ["config.yaml"]
 
 [build-system]
 requires      = ["setuptools>=68"]

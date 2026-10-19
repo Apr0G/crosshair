@@ -1,0 +1,6 @@
+{
+  "map": "de_overpass",
+  "status": "pending",
+  "note": "Real callout polygons are pending: Faig decides between hand-drawn polygons and a community callout set. Until then lookup() falls back to 'area_<nav area id>' so every on-mesh position still resolves. Format of each entry: {\"name\": str, \"polygons\": [[[x, y], ...]], \"z_min\": num, \"z_max\": num}.",
+  "callouts": []
+}

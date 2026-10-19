@@ -44,3 +44,4 @@ data/
 # Claude Code — settings hold machine-specific paths, but skills are shared work
 .claude/*
 !.claude/skills/
+.venv-old311/

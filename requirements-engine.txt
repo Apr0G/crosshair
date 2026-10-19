@@ -1,0 +1,19 @@
+# Crosshair engine v2 — authoritative dependency list (Python 3.12, one venv).
+# Exact resolution lives in requirements-engine.lock; re-freeze after any upgrade.
+# torch is installed separately from AMD's ROCm-for-Windows wheels (see docs/ENGINE_ENV.md);
+# on other platforms install the matching torch build yourself before `pip install -r`.
+awpy>=3.1,<4
+polars>=1.0,<3
+pyarrow>=17,<23
+numpy>=2,<3
+pandas>=2.2,<3
+lightgbm>=4.5,<5
+scikit-learn>=1.5,<2
+faiss-cpu>=1.9,<2
+matplotlib>=3.9,<4
+pyyaml>=6,<7
+jsonschema>=4.23,<5
+zstandard>=0.23,<1
+requests>=2.32,<3
+playwright>=1.49,<2
+pyflakes>=3.2,<4

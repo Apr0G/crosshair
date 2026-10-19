@@ -1,0 +1,181 @@
+# Crosshair engine v2 — every tunable in one place (docs/ENGINE_PLAN.md Appendix D).
+# Loaded and validated by engine/config.py; its sha256 (`config_hash`) goes into every
+# run manifest, so changing any value here changes the hash of every later artifact.
+#
+# Conventions: distances in Hammer units ("u"), times in seconds, probabilities and
+# win-probability amounts in [0, 1]. `null` means "not decided yet" — never 0 or "?".
+# Write small floats with a dot (3.0e-4): YAML 1.1 reads `3e-4` as a string.
+
+# ── P3: sampling ──────────────────────────────────────────────────────────────
+sampling:
+  sample_hz: 2                  # Hz, grid sampling rate; one of 1, 2, 4, 8 (D6, P3.1.1)
+  boundary_offset_ticks: 1      # ticks, boundary samples at action tick ± this (P3.1.2)
+  max_utility_tokens: 16        # count, utility tokens per snapshot, newest kept (P3.3.2)
+  los_cache: true               # per-area LOS cache within a match; exact mode for goldens (P3.5.2)
+  heard_window_s: 2.0           # s, window for the heard_enemy sound cue (P3.2.5)
+
+# ── P3.4: round clock ─────────────────────────────────────────────────────────
+clock:
+  round_time_s: 115             # s, round timer from freeze_end before plant (P3.4.1)
+  bomb_timer_s: 40              # s, bomb timer after plant (P3.4.1)
+  freeze_time_s: 20             # s, freeze time; unused by features (P3.4, informational)
+
+# ── P4: action extraction ─────────────────────────────────────────────────────
+actions:
+  simultaneity_ticks: 2         # ticks, instant actions this close share a window (P4.6.1)
+  damage_gap_s: 2               # s, no-damage gap that splits engagements (P4.2.2)
+  movement_min_units: 32        # u, displacement that makes a player a mover (P4.2.5, P8.4.1)
+  rotation_min_units: 600       # u, nav distance between callout centroids for a rotation (P4.3.3)
+  hold_min_s: 5                 # s, stationary span for a hold (P4.3.4)
+  hold_max_speed: 20            # u/s, speed below which a player counts as stationary (P4.3.4)
+  save_min_units: 800           # u, distance-to-bomb increase for a save (P4.3.5)
+  save_window_s: 5              # s, span over which save_min_units is measured (P4.3.5)
+  trade_window_s: 5             # s, teammate death this recent sets up a trade (P4.5.1)
+  trade_max_units: 1200         # u, max distance from the victim for trade_setup (P4.5.1)
+  enabler_recent_s: 3           # s, HE / fire / info enablers look back this far (P4.5.1)
+  buy_bands:                    # $ equipment value, upper bounds (exclusive); above force = full (P4.4.1)
+    pistol: 1000
+    eco: 2000
+    half: 3500
+    force: 4500
+
+# ── P6.2: model architecture and heads ────────────────────────────────────────
+model:
+  d_model: 128                  # width of token embeddings (P6.2.1)
+  d_pool: 256                   # width of the pooled set embedding h_t (P6.2.2)
+  L_set: 3                      # set-transformer blocks (P6.2.2)
+  L_time: 2                     # causal temporal blocks (P6.2.3)
+  n_heads: 4                    # attention heads; must divide d_model (P6.2.2)
+  temporal_window_s: 10         # s, history the temporal encoder sees (P6.2.3)
+  hazard_horizon_s: 5           # s, death-hazard head horizon (P3.7.1, P6.2.4)
+  plant_horizon_s: 15           # s, plant15 head horizon (P3.7.1, P6.2.4)
+  defuse_horizon_s: 15          # s, defuse15 head horizon (P3.7.1, P6.2.4)
+  loss_weights:                 # relative loss weights per head (P6.3.1)
+    win: 1.0
+    hazard: 0.5
+    plant: 0.2
+    defuse: 0.2
+    tte: 0.1
+  terminal_weight: 2.0          # loss multiplier on terminal snapshots (P6.3.1)
+
+# ── P6.3: training ────────────────────────────────────────────────────────────
+train:
+  lr: 3.0e-4                    # AdamW learning rate (P6.3.1)
+  wd: 0.01                      # AdamW weight decay (P6.3.1)
+  warmup_steps: 1000            # steps, linear warm-up before cosine decay (P6.3.1)
+  batch_rounds: 256             # round-windows per batch (P6.3.1)
+  max_epochs: 30                # epochs (P6.3.1)
+  patience: 3                   # epochs without val improvement before stopping (P6.3.1)
+  pro_oversample: 4             # pro sampling multiplier vs its natural share (P6.3.2)
+  pro_finetune_epochs: 2        # epochs of the pro-only fine-tune stage (P6.3.2)
+  pro_finetune_lr: 3.0e-5       # learning rate of the fine-tune stage (P6.3.2)
+  seed: 1337                    # global seed, logged in every manifest (P6.3.1)
+
+# ── P6.3.3: augmentation (training only) ──────────────────────────────────────
+augment:
+  util_drop: 0.1                # probability, drop each utility token
+  pos_jitter_units: 16          # u, std of position jitter for alive players
+  unflash: 0.05                 # probability, zero a blind player's flash time
+  los_flip: 0.02                # probability, flip a random los bit
+  dead_token_drop: 0.5          # probability, drop a dead player's token entirely
+
+# ── P6.5 / P6.6.2: calibration ────────────────────────────────────────────────
+calib:
+  ece_target: 0.02              # max expected calibration error on test pro (P6.5.2)
+  n_bins: 20                    # reliability bins (P6.5.2)
+  bin_tol: 0.03                 # max |mean_pred - observed| per bin (P6.5.2)
+  min_bin_n: 200                # bins with fewer snapshots are not judged (P6.5.2)
+  martingale_tol: 0.01          # max |mean W(t+k) - W(t)| per bin (P6.6.2)
+  martingale_min_n: 500         # bins with fewer snapshots are not judged (P6.6.2)
+  martingale_horizons_s: [1, 5, 10]   # s, look-ahead k values (P6.6.2)
+
+# ── P6.6 / P6.7.2 / P7.2: sanity thresholds (targets) ─────────────────────────
+sanity:
+  # P6.6.1 model-level sanity, rates over sampled test snapshots
+  model_n_snapshots: 10000      # count
+  revive_ct_up_rate: 0.97       # W rises when a dead CT is revived
+  revive_t_down_rate: 0.97      # W falls when a dead T is revived
+  plant_down_rate: 0.95         # W falls after a plant edit
+  time_left_down_rate: 0.90     # more pre-plant time lowers W when alive_t >= alive_ct
+  # P6.7.2 hazard head quality (AUC on test pro)
+  hazard_auc_target: 0.80       # at or above: hazard enabler mode, no warning
+  hazard_auc_floor: 0.75        # below: fall back to attribution.fixed_shares
+  # P7.2 counterfactual gate
+  cf_n_events: 10000            # count, sampled instantaneous events
+  cf_n_drift: 10000             # count, sampled drift intervals
+  unkill_toward_rate: 0.98      # P7.2.1, W moves toward the victim's side
+  unkill_median_abs: 0.03       # P7.2.1, min median |ΔW|
+  smoke_floor: -0.01            # P7.2.2, non-owner ΔW must be >= this ...
+  smoke_floor_rate: 0.95        #         ... in at least this share of cases
+  smoke_max_abs: 0.25           # P7.2.2, |ΔW| <= this ...
+  smoke_max_abs_rate: 0.99      #         ... in at least this share
+  unflash_floor: -0.005         # P7.2.3, blinded side's ΔW >= this ...
+  unflash_rate: 0.95            #         ... in at least this share
+  unplant_down_rate: 0.95       # P7.2.4, T-side W falls
+  freeze_max_abs: 0.15          # P7.2.5, |ΔW| <= this ...
+  freeze_max_abs_rate: 0.99     #         ... in at least this share of intervals
+  freeze_mean_abs: 0.005        # P7.2.5, |mean ΔW| <= this
+  ood_k: 10                     # P7.2.7, k-th nearest training embedding
+  ood_percentile: 99            # P7.2.7, percentile of factual distances that flags an edit
+  ood_max_rate: 0.05            # P7.2.7, max flagged share per intervention type
+
+# ── P8: attribution ───────────────────────────────────────────────────────────
+attribution:
+  shapley_exact_max: 6          # members; exact Shapley up to this, sampled above (P8.2.1)
+  shapley_samples: 200          # permutations for sampled Shapley (P8.2.2)
+  drift_threshold_wp: 0.02      # |ΔW| below which drift uses leave-one-out (P8.4.1)
+  enabler_mode: hazard          # hazard | fixed (P8.5.3)
+  enabler_total_cap: 0.5        # max total enabler share of an event (D4, P8.5)
+  trade_share_band: [0.05, 0.40]   # clamp for trade_setup shares (D4, P8.5)
+  other_share_band: [0.0, 0.6]     # clamp for every other enabler kind (P8.5)
+  min_hazard: 0.02              # q_v below this: unstable, use the band floor (P8.5.2)
+  fixed_shares:                 # used only when enabler_mode is fixed (P8.5.3)
+    flash: 0.20
+    smoke_cover: 0.10
+    trade_setup: 0.20
+    he_damage: 0.10
+    fire_pressure: 0.10
+
+# ── P9: expected value, decision, execution ───────────────────────────────────
+value:
+  k_neighbours: 200             # nearest pro states in the panel (P9.3.2)
+  n_min_regret: 30              # min support for an alternative to set the regret max (P9.3.3)
+  delta_D: 0.01                 # decision verdict dead band (P9.4)
+  delta_X: 0.02                 # execution verdict dead band (P9.4)
+  q_finetune_encoder: false     # fine-tune the WP encoder inside QNet (P9.2.1)
+
+# ── P0.6 / P10.3: time budget (seconds, mirrors bench/budget.yaml) ────────────
+bench:
+  budgets:                      # s per stage on the golden demo (P10.3.1)
+    parse:       {gpu: 15, cpu: 15}
+    states:      {gpu: 8,  cpu: 8}
+    actions:     {gpu: 3,  cpu: 3}
+    predict:     {gpu: 5,  cpu: 30}
+    attribution: {gpu: 15, cpu: 90}
+    value:       {gpu: 5,  cpu: 20}
+    report:      {gpu: 4,  cpu: 4}
+    total:       {gpu: 55, cpu: 170}
+  hard_ceiling_gpu: 120         # s, above this v1 is not done (C3)
+  hard_ceiling_cpu: 300         # s, above this v1 is not done (C3)
+
+# ── P1 / P2.2: data ───────────────────────────────────────────────────────────
+data:
+  awpy_data_release: "2000933"  # awpy-data release pin for map assets (set 2026-10-19, P2.2.1)
+  targets:                      # counts, reported by `engine inventory --assert-targets` (P1.1.6, P1.2.3)
+    pro_maps: 3000
+    pro_per_map: 200
+    pro_per_month: 50
+    faceit_maps: 50000
+    faceit_per_map: 3000
+
+# ── P5.4: data QA ─────────────────────────────────────────────────────────────
+qa:
+  max_null_pct:                 # %, per feature family; null until the first QA report (P5.4.2)
+    player: null
+    utility: null
+    context: null
+    pairwise: null
+  max_outliers: null            # count per split; null until the first QA report (P5.4.2)
+  outlier_max_speed: 320        # u/s, faster is an outlier (P5.4.1)
+  outlier_max_health: 100       # hp, more is an outlier (P5.4.1)
+  outlier_max_alive: 5          # players alive per side, more is an outlier (P5.4.1)
