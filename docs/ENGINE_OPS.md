@@ -11,8 +11,13 @@ list at the end says what is needed).
 
 ## Status today
 
-No pro demo, no dataset and no trained model exist yet, so none of the checklists
-below has been run. They are the procedure for when data arrives.
+No demo, no dataset and no trained model exist yet, so none of the checklists
+below has been run. They are the procedure for when data arrives. Since Amendment 2
+(2026-10-19) the baseline tier is `faceit_10`; every "pro" below reads `faceit_10`
+unless it says "transfer". **Weekly, not monthly:** FACEIT keeps demos about 30 days
+and the free Downloads tier is 1,500 requests or 200 GB per month, so step 2's
+`scrape` runs at least weekly with `--max` sized to the remaining monthly quota
+(`inventory` prints it once the quota ledger exists; until then count by hand).
 
 ## Monthly retraining checklist (P12.2)
 
@@ -20,7 +25,7 @@ below has been run. They are the procedure for when data arrives.
    `.venv\Scripts\python.exe -m engine.cli inventory --assert-targets` (shortfalls are
    reminders, not a gate). Check free space: batch work is refused below 20 GB.
 2. **New demos.** Download (`... -m engine.cli scrape --source api --min-level 10`
-   for FACEIT; pro per `docs/DATA_SOURCES.md`), then
+   for FACEIT; optional pro transfer set per `docs/DATA_SOURCES.md`), then
    `... -m engine.cli parse data\engine\demos\pro` (and `...\faceit`),
    `... -m engine.cli build-states --all`, `... -m engine.cli build-actions --all`,
    `... -m engine.cli inventory --rebuild-catalog`.
@@ -34,9 +39,13 @@ below has been run. They are the procedure for when data arrives.
    (ablations: `--no-temporal`, `--no-pairwise`, `--no-aux-heads`, `--tiers pro`).
 7. **Calibrate.** `... -m engine.cli calibrate -- --model-dir data\engine\models\wp_v<N> --assert`
    (also reachable as `eval --calibration --model wp_v<N>`).
-8. **Sanity gates.** `... -m engine.cli sanity --model wp_v<N> --counterfactual`
-   (P7.2; exit 1 on any failed rate). The model-level gate (`sanity --model wp_v<N>`,
-   P6.6) is **missing** (`engine/model/sanity.py` does not exist yet). On a failure
+8. **Sanity gates.** `... -m engine.cli sanity --model wp_v<N> --counterfactual [-- --states <root> --max-matches K]`
+   (P7.2; samples events, order windows and drift intervals from every stored match
+   under `data/engine/{states,actions,windows}` with the map's real geometry; exit 0
+   green, 1 a failed rate, 2 missing model / calibration / states / map assets). It
+   writes `eval/sanity_cf_wp_v<N>.md` and `models/wp_v<N>/sanity_cf.json`; `registry
+   adopt` refuses a wp model without a green record. The model-level gate
+   (`sanity --model wp_v<N>`, P6.6) is **missing** (`engine/model/sanity.py` does not exist yet). On a failure
    follow the P7.3 loop: one remedy per iteration, retrain, rerun P6.5–P6.6 and P7.2,
    log it in `eval/DECISION_wp_v<N>.md`, at most five iterations, then escalate to Faig.
 9. **Value models.** `train-q` and `build-neighbours` are **missing** as runnable
@@ -125,7 +134,8 @@ below has been run. They are the procedure for when data arrives.
 Everything produced by commands, nothing hand-edited:
 
 - [ ] golden demo report (`engine analyze` on the golden demo, adopted models only)
-- [ ] five pro match reports
+- [ ] five `faceit_10` match reports, one `semi_pro`, one `pro` (transfer) report
+- [ ] data-provenance statement (sources, terms read, dates) and the FACEIT Downloads approval
 - [ ] anchors report (`anchors_wp_v<N>.md`)
 - [ ] calibration report (`eval --calibration`)
 - [ ] ablation table (`eval/ablations_v<N>.md`, P6.7.1)
@@ -141,7 +151,10 @@ Everything produced by commands, nothing hand-edited:
 | needed for | missing | where it would live |
 |---|---|---|
 | new split file | a CLI command around `splits.make_splits` | `engine/cli.py` |
-| HLTV downloads | `scrape --source hltv` cannot take the match list | `engine/cli.py` |
+| HLTV downloads | dormant since Amendment 2 (terms forbid); not to be built | — |
+| FACEIT competition discovery | organizer → championships → past matches (Amendment 2 P1.2.2) | `engine/sources/faceit_api.py` |
+| monthly quota ledger | requests + bytes per month, stop at the cap (Amendment 2 P1.2.3) | `engine/db.py` (ask-before), `engine/ingest.py` |
+| pro transfer report | `eval --transfer` (Amendment 2 P11.4) | `engine/cli.py` |
 | value models | `train-q`, `build-neighbours` (no `main`) | `engine/value/q_model.py`, `neighbours.py` |
 | model sanity gate | `sanity --model` | `engine/model/sanity.py` |
 | attribution eval | `eval --attribution` | `engine/attribution/evaluate.py` |

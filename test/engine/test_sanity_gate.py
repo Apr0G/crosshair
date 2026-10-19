@@ -131,15 +131,48 @@ noisy = sanity.run_gate(RuleStub(lambda s, h: good_win(s) + 1e-9 * next(tick)), 
 check("order test catches a W that differs between the two orders",
       not noisy.tests["order"].passed and noisy.tests["order"].metrics["identical_rate"] == 0.0)
 
+# ── sampling from stored states / actions / windows (MED-16) ──────────────────
+section("samples_from on the synthetic stories")
+from _synthetic import STORIES, make_raw_tables      # noqa: E402
+from engine.actions import extractor                 # noqa: E402
+from engine.state.geometry import FlatGeometry       # noqa: E402
+
+kinds_seen, total = set(), []
+for story in STORIES:
+    snaps, acts, wins = extractor.run(make_raw_tables(story), cfg, match_key=f"gate-{story}", geometry=FlatGeometry())
+    smp = sanity.samples_from(snaps, acts, wins, rng=random.Random(1))
+    kinds_seen |= {s[0] for s in smp}
+    total += smp
+check("every gate kind is sampled across the six stories", {"kill", "smoke", "flash", "plant", "freeze", "order"} <= kinds_seen,
+      str(sorted(kinds_seen)))
+check("samples carry the window's own s_pre / s_post (ticks differ, same round)",
+      all(s[1].meta.round_num == s[2].meta.round_num and s[1].meta.tick < s[2].meta.tick for s in total))
+only_drift = sanity.samples_from(snaps, acts, wins, n_events=0, n_drift=2, rng=random.Random(1))
+only_events = sanity.samples_from(snaps, acts, wins, n_events=3, n_drift=0, rng=random.Random(1))
+check("n_events / n_drift cap the two groups", len(only_drift) <= 2 and all(s[0] == "freeze" for s in only_drift)
+      and len(only_events) <= 3, f"{len(only_drift)} drift, {len(only_events)} events")
+real = sanity.run_gate(RuleStub(good_win), total, cfg, geometry=FlatGeometry(), model="rule:stories")
+check("run_gate accepts builder samples with a geometry and judges every kind",
+      all(t.n > 0 for n, t in real.tests.items() if n != "ood"), {n: t.n for n, t in real.tests.items()})
+with tempfile.TemporaryDirectory() as tmp:
+    rec = sanity.write_record(Path(tmp), real)
+    check("sanity_cf.json records the verdict per test", rec.is_file()
+          and sanity.gate_passed(Path(tmp)) == real.passed and sanity.gate_passed(Path(tmp) / "none") is None)
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 section("main()")
 
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     code = sanity.main([])
-check("main() exits 2 without a model and states", code == 2, buf.getvalue().splitlines()[0][:80])
+check("main() exits 2 without a model", code == 2, buf.getvalue().splitlines()[0][:80])
 with contextlib.redirect_stdout(io.StringIO()):
-    code2 = sanity.main(["--model", "nope.ckpt", "--states", "nope.parquet"])
-check("main() exits 2 for missing paths", code2 == 2)
+    code2 = sanity.main(["--model", "nope_v99", "--states", "nope_dir"])
+check("main() exits 2 for a missing model directory", code2 == 2)
+with tempfile.TemporaryDirectory() as tmp:
+    (Path(tmp) / "wp_v1").mkdir()
+    with contextlib.redirect_stdout(io.StringIO()):
+        code3 = sanity.main(["--model", str(Path(tmp) / "wp_v1"), "--states", tmp])
+    check("main() exits 2 when no states are stored under --states", code3 == 2)
 
 sys.exit(summary())

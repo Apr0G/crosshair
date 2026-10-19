@@ -19,7 +19,9 @@ disagree. `adopt` still refuses rule text that names another model version or ca
 a status word, so a row reads unambiguously to a human too (2026-10-19 audit, HIGH-02).
 
 P6.7.2 is enforced for `wp` models: log loss at least LOGLOSS_MARGIN (0.01) below the
-LightGBM baseline and ECE at most `calib.ece_target` (0.02). Other kinds record their
+LightGBM baseline and ECE at most `calib.ece_target` (0.02); the model directory must
+hold `calibration.json` (R6) and a green `sanity_cf.json` from `engine sanity
+--counterfactual` (the P7 gate; MED-16 / MED-20, 2026-10-19). Other kinds record their
 numbers; the decision rule text says why they were adopted.
 
 Filled by: P12.1.
@@ -137,6 +139,15 @@ def adopt(name: str, numbers: dict, rule: str, *, doc: Path | None = None, when:
         if kind_of(name) == "wp" and not (mdir / name / "calibration.json").is_file():
             raise ValueError(f"{name} has no calibration.json: run `calibrate` first; an uncalibrated win model "
                              f"is never adopted (R6, MED-20)")
+        if kind_of(name) == "wp":
+            from engine.counterfactual.sanity import GATE_FILE, gate_passed
+            ok = gate_passed(mdir / name)
+            if ok is None:
+                raise ValueError(f"{name} has no {GATE_FILE}: run `sanity --model {name} --counterfactual` first; "
+                                 f"no attribution is trusted before the P7 gate is green")
+            if not ok:
+                raise ValueError(f"{name} failed the P7 counterfactual gate ({GATE_FILE}: passed false); "
+                                 f"follow the P7.3 loop before adopting")
     rule = (rule or "").strip()
     if not rule or "|" in rule or "\n" in rule:
         raise ValueError("rule must be one non-empty line without '|'")

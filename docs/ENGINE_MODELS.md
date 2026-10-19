@@ -12,16 +12,20 @@ does **not** mean usable. A model is **adopted** only when it has a row with sta
 
 - Add rows only with the registry, never by hand:
   `.venv\Scripts\python.exe -m engine.evaluation.registry adopt <kind>_v<N> --logloss ... --brier ... --ece ... --baseline-logloss ... [--hazard-auc ...] --rule "..."`.
-  It refuses a model with no manifest, a second row for the same model, and a `wp`
-  model whose numbers fail P6.7.2.
+  It refuses a model with no manifest, a second row for the same model, a `wp` model
+  whose numbers fail P6.7.2, a `wp` model without `calibration.json` (R6) and a `wp`
+  model without a green `sanity_cf.json` from `engine sanity --counterfactual` (P7).
 - One row per model. To take a model out of use, change the **status** cell of its row
   in place to `retired`, `superseded`, `revoked` or `rejected`. Do not add a second row.
 - Only the **model cell** of a row with status `adopted` adopts a model.
   `engine.analyze` reads the table through the registry (`adoption_rows`), so a
   version named in prose or in another row's rule text adopts nothing; the registry
   still refuses rule text that names another model version, to keep rows unambiguous.
-- All numbers are on the **test pro** months of the split file the model was trained
-  with (never val, never FACEIT).
+- All numbers are on the **test months of the baseline tier `faceit_10`** of the split
+  file the model was trained with (never val). Since Amendment 2 (2026-10-19) the
+  baseline is FACEIT level 10, not pro; pro numbers are a transfer test and go in the
+  rule cell as `transfer: logloss=... ece=...` until the registry gains a column. Every
+  "pro" in the decision rules below reads "`faceit_10`".
 - `docs/ENGINE_PROGRESS.md` is the place for narrative; this file is the record.
 
 ## Decision rules (P6.7.2, written before any result so they are not negotiated later)

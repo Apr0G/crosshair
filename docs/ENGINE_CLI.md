@@ -260,8 +260,14 @@ With several targets the exit code is the worst one. No target: exit 2.
 python -m engine.cli sanity --model wp_v1 [--counterfactual]
 ```
 
-`--counterfactual` runs the P7.2 gate (`engine.counterfactual.sanity`); without it the
-P6.6 model sanity (`engine.model.sanity`, not written yet: exit 2).
+`--counterfactual` runs the P7.2 gate (`engine.counterfactual.sanity`) over the stored
+states, actions and windows (default root `data/engine`; `-- --states <root>`,
+`--max-matches`, `--n-events`, `--n-drift`, `--seed` pass through) with the map's real
+geometry, writes `eval/sanity_cf_<model>.md` and `<model dir>/sanity_cf.json`, and
+exits 0 when green, 1 on a failed test, 2 when the model, its calibration, the states
+or the map assets are missing. Adoption (`registry adopt`) requires the green record.
+Without `--counterfactual` the P6.6 model sanity (`engine.model.sanity`, not written
+yet: exit 2).
 
 ### `review`
 

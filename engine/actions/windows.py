@@ -49,12 +49,25 @@ def _window_id(round_num: int, start: int, end: int, members) -> str:
 
 # ── grouping ──────────────────────────────────────────────────────────────────
 
+def _span_end(a) -> int:
+    """Last tick an instant action's window must reach: tick + 1, or its
+    `state_post_tick` when the action set one further out (a drop's pickup: the
+    receiver's jump then belongs to the drop, not to drift; MED-15, 2026-10-19)."""
+    end = int(a.tick) + 1
+    post = getattr(a, "state_post_tick", None)
+    if post is not None and int(post) > end:
+        end = int(post)
+    return end
+
+
 def group(actions, cfg, tick_rate: int, rounds: dict | None = None) -> list[Window]:
-    """Event windows of every round, sorted by (round, start)."""
+    """Event windows of every round, sorted by (round, start). Two actions share a
+    window when their ticks are within `simultaneity_ticks`, or when one falls inside
+    the other's span (see `_span_end`)."""
     if int(tick_rate) <= 0:
         raise ValueError(f"tick_rate must be > 0, got {tick_rate}")
     sim = int(cfg.actions.simultaneity_ticks)
-    by_round: dict[int, list[tuple[int, str]]] = {}
+    by_round: dict[int, list[tuple[int, int, str]]] = {}
     for a in actions:
         if a.kind != "instant" or a.tick is None:
             continue
@@ -62,23 +75,23 @@ def group(actions, cfg, tick_rate: int, rounds: dict | None = None) -> list[Wind
             b = rounds.get(a.round_num)
             if b is None or not (b[0] <= a.tick <= b[1]):
                 continue
-        by_round.setdefault(a.round_num, []).append((int(a.tick), a.action_id))
+        by_round.setdefault(a.round_num, []).append((int(a.tick), _span_end(a), a.action_id))
 
     out: list[Window] = []
     for r in sorted(by_round):
         items = sorted(by_round[r])
-        clusters: list[list[tuple[int, str]]] = []
+        clusters: list[list[tuple[int, int, str]]] = []
         for it in items:
-            if clusters and it[0] - clusters[-1][-1][0] <= sim:
+            if clusters and (it[0] - clusters[-1][-1][0] <= sim or it[0] <= max(e for _, e, _ in clusters[-1])):
                 clusters[-1].append(it)
             else:
                 clusters.append([it])
         lo_b, hi_b = rounds[r] if rounds is not None else (None, None)
         for c in clusters:
-            start, end = c[0][0] - 1, c[-1][0] + 1
+            start, end = c[0][0] - 1, max(e for _, e, _ in c)
             if lo_b is not None:
                 start, end = max(lo_b, start), min(hi_b, end)
-            members = tuple(aid for _, aid in c)
+            members = tuple(aid for _, _, aid in c)
             out.append(Window(window_id=_window_id(r, start, end, members), round_num=r,
                               start_tick=start, end_tick=end, member_action_ids=members))
     return out

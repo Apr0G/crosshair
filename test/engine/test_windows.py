@@ -45,6 +45,12 @@ pop = inst("smoke_pop", 2000, 3, parent_action_id="p" * 16)
 ws = windows.group([k1, pop], CFG, 128)
 check("smoke pop on the kill tick -> one window [kill, smoke_pop]", len(ws) == 1
       and set(ws[0].member_action_ids) == {k1.action_id, pop.action_id})
+give = inst("drop", 900, 4, receiver_id=7, pickup_tick=1300)
+give.state_post_tick = 1301
+ws = windows.group([give, inst("kill", 1200, 1), inst("kill", 1900, 2)], CFG, 128)
+check("a drop's window reaches its pickup and absorbs a kill inside the span (MED-15)",
+      len(ws) == 2 and (ws[0].start_tick, ws[0].end_tick) == (899, 1301) and len(ws[0].member_action_ids) == 2
+      and (ws[1].start_tick, ws[1].end_tick) == (1899, 1901), str([(w.start_tick, w.end_tick) for w in ws]))
 chain = [inst("damage", t, 5) for t in (100, 102, 104, 106)]
 for i, a in enumerate(chain):
     a.window_start_tick = a.window_end_tick = a.tick

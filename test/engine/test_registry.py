@@ -42,6 +42,7 @@ def model_dir(root: Path, name: str, cal: dict | None = None, extra: dict | None
                                      encoding="utf-8")
     if cal is not None:
         (d / "calibration.json").write_text(json.dumps(cal), encoding="utf-8")
+        (d / "sanity_cf.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
     return d
 
 
@@ -115,6 +116,14 @@ with tempfile.TemporaryDirectory() as td:
             lambda: rg.adopt("wp_v8", GOOD, "beats wp_v7 by 0.02", doc=doc, models_dir=models))
     agrees(doc, ["wp_v7", "wp_v8"])
     refused("model without a manifest refused", lambda: rg.adopt("wp_v9", GOOD, "ok", doc=doc, models_dir=models))
+    model_dir(models, "wp_v10", cal={"T": 1.0})
+    (models / "wp_v10" / "sanity_cf.json").write_text(json.dumps({"passed": False}), encoding="utf-8")
+    refused("wp model that failed the P7 gate refused (MED-16)",
+            lambda: rg.adopt("wp_v10", GOOD, "ok", doc=doc, models_dir=models))
+    (models / "wp_v10" / "sanity_cf.json").unlink()
+    refused("wp model without a gate record refused (MED-16)",
+            lambda: rg.adopt("wp_v10", GOOD, "ok", doc=doc, models_dir=models))
+    shutil.rmtree(models / "wp_v10")                      # keep the list_models fixture at three dirs
     refused("bad name refused", lambda: rg.adopt("WP-7", GOOD, "ok", doc=doc, models_dir=models))
     refused("unknown number key refused", lambda: rg.adopt("wp_v8", {**GOOD, "auc": 0.9}, "ok", doc=doc,
                                                            models_dir=models))

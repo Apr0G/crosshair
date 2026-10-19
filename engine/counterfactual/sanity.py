@@ -9,7 +9,12 @@ smoke, un-flash, un-plant, freeze, order independence, OOD rate; thresholds in
     report.passed                                   # False -> exit 1
 
 `samples` yields `(kind, s_pre, s_post, action)` (optionally a fifth item, the factual
-history passed to the Predictor; default `[]`). Kinds and the edit each one makes:
+history passed to the Predictor; default `[]`). `samples_from(snapshots, actions,
+windows, ...)` builds them from a match's stored states, actions and windows, and
+`main()` does so for every match under `--states` with the map's real geometry, so the
+gate certifies the same intervention path `analyze` runs (MED-16, 2026-10-19). A green
+run writes `<model_dir>/sanity_cf.json`, which `registry.adopt` requires for a wp model.
+Kinds and the edit each one makes:
 
     kill    undo_kill(s_post, action, s_pre)          P7.2.1  W moves toward the victim's side
     smoke   remove_utility(s_post, action)            P7.2.2  non-owner side not hurt, no wild swing
@@ -32,7 +37,9 @@ torch.
 Filled by: P7.2.1-P7.2.8.
 """
 import argparse
+import json
 import math
+import random
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -42,10 +49,15 @@ from typing import Callable, Iterable
 import numpy as np
 
 from engine.actions.types import Action
-from engine.counterfactual.apply import all_subsets, apply
+from engine.counterfactual.apply import INTERVENTION_FOR_TYPE, all_subsets, apply
 from engine.counterfactual.interventions import (InterventionError, blinded_players, freeze_position,
                                                  remove_utility, undo_kill, unflash, unplant)
 from engine.state.schema import Snapshot
+
+GATE_FILE = "sanity_cf.json"       # written next to the model: the record adoption checks
+# instant action type -> gate sample kind (a window member becomes one sample)
+KIND_OF_TYPE = {"kill": "kill", "team_kill": "kill", "smoke_pop": "smoke", "flash": "flash",
+                "plant_complete": "plant", "peek": "freeze"}
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
@@ -124,17 +136,17 @@ def _actor(action) -> int:
     return action if isinstance(action, (int, np.integer)) else action.actor_id_hash
 
 
-def _edit(kind: str, s_pre: Snapshot, s_post: Snapshot, action) -> Snapshot:
+def _edit(kind: str, s_pre: Snapshot, s_post: Snapshot, action, geometry=None) -> Snapshot:
     if kind == "kill":
-        return undo_kill(s_post, action, s_pre)
+        return undo_kill(s_post, action, s_pre, geometry=geometry)
     if kind == "smoke":
-        return remove_utility(s_post, action)
+        return remove_utility(s_post, action, geometry=geometry)
     if kind == "flash":
-        return unflash(s_post, action, s_pre)
+        return unflash(s_post, action, s_pre, geometry=geometry)
     if kind == "plant":
-        return unplant(s_post, action, s_pre)
+        return unplant(s_post, action, s_pre, geometry=geometry)
     if kind == "freeze":
-        return freeze_position(s_post, _actor(action), s_pre)
+        return freeze_position(s_post, _actor(action), s_pre, geometry=geometry)
     raise ValueError(f"unknown sample kind {kind!r}")
 
 
@@ -153,9 +165,10 @@ def _worst(cases: list[dict], key: Callable, reverse: bool = False) -> list[dict
 # ── the gate ──────────────────────────────────────────────────────────────────
 
 def run_gate(predictor, samples: Iterable, cfg, *, ood=None, embed: Callable | None = None,
-             model: str | None = None) -> GateReport:
+             model: str | None = None, geometry=None) -> GateReport:
     """Run P7.2.1-P7.2.7 over `samples` with thresholds from `cfg.sanity`. One batched
-    Predictor pass over every factual and edited state."""
+    Predictor pass over every factual and edited state. `geometry` is passed to every
+    intervention, as `analyze` does; without it edited LOS rows are NaN (MED-16)."""
     th = cfg.sanity
     results = {name: TestResult(name) for name in TESTS}
     cases: list[dict] = []           # one per evaluated edit: kind, refs into the batch
@@ -185,12 +198,12 @@ def run_gate(predictor, samples: Iterable, cfg, *, ood=None, embed: Callable | N
                     raise InterventionError("order sample needs >= 2 members")
                 pairs = []
                 for sub in _order_subsets(members):
-                    a, _ = apply(s_pre, s_post, members, set(sub), order="reverse")
-                    b, _ = apply(s_pre, s_post, members, set(sub), order="forward")
+                    a, _ = apply(s_pre, s_post, members, set(sub), order="reverse", geometry=geometry)
+                    b, _ = apply(s_pre, s_post, members, set(sub), order="forward", geometry=geometry)
                     pairs.append((a == b, push(a, hist), push(b, hist)))
                 cases.append({"kind": kind, "where": _where(s_post), "pairs": pairs})
                 continue
-            s_cf = _edit(kind, s_pre, s_post, action)
+            s_cf = _edit(kind, s_pre, s_post, action, geometry)
         except InterventionError as e:
             res.n_errors += 1
             if len(res.errors) < N_WORST:
@@ -375,26 +388,195 @@ def write_report(report: GateReport, path) -> Path:
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+# ── sampling from stored states / actions / windows (P7.2.8) ─────────────────
+
+def samples_from(snapshots: list, actions: list, windows: list, *, n_events: int | None = None,
+                 n_drift: int | None = None, rng: random.Random | None = None) -> list[tuple]:
+    """Gate samples of one match: every window member whose type has a gate kind gives
+    `(kind, s_pre, s_post, action)` with s_pre / s_post the snapshots at the window's
+    start and end; every window with >= 2 interventionable members gives an `order`
+    sample; consecutive factual snapshots outside windows give `freeze` samples for a
+    player who moved between them (drift). `n_events` / `n_drift` cap the two groups
+    (uniform without replacement, seeded by `rng`)."""
+    rng = rng or random.Random(0)
+    by_id = {a.action_id: a for a in actions}
+    rounds: dict[int, dict[int, Snapshot]] = {}
+    for s in snapshots:
+        rounds.setdefault(s.meta.round_num, {})[int(s.meta.tick)] = s
+    events, drift = [], []
+    covered: dict[int, set[int]] = {}
+    for w in windows:
+        by_tick = rounds.get(w.round_num, {})
+        s_pre, s_post = by_tick.get(int(w.start_tick)), by_tick.get(int(w.end_tick))
+        if s_pre is None or s_post is None:
+            continue
+        covered.setdefault(w.round_num, set()).update(range(int(w.start_tick), int(w.end_tick) + 1))
+        members = [by_id[i] for i in w.member_action_ids if i in by_id]
+        for a in members:
+            kind = KIND_OF_TYPE.get(a.type)
+            if kind is not None:
+                events.append((kind, s_pre, s_post, a))
+        order = [a for a in members if a.type in INTERVENTION_FOR_TYPE]
+        if len(order) >= 2:
+            events.append(("order", s_pre, s_post, order))
+    for r, by_tick in rounds.items():
+        ticks = sorted(by_tick)
+        cov = covered.get(r, set())
+        for t0, t1 in zip(ticks, ticks[1:]):
+            if any(t in cov for t in (t0, t1)):
+                continue
+            a, b = by_tick[t0], by_tick[t1]
+            pos_b = {p.player_id: (p.x, p.y, p.z) for p in b.players if p.alive == 1}
+            movers = [p.player_id for p in a.players
+                      if p.alive == 1 and p.player_id in pos_b and (p.x, p.y, p.z) != pos_b[p.player_id]]
+            if movers:
+                drift.append(("freeze", a, b, rng.choice(sorted(movers))))
+    if n_events is not None and len(events) > n_events:
+        events = rng.sample(events, n_events)
+    if n_drift is not None and len(drift) > n_drift:
+        drift = rng.sample(drift, n_drift)
+    return events + drift
+
+
+def _load_match(states_path: Path):
+    """(snapshots, actions, windows, map_version) of one stored match (layout P5.1)."""
+    import polars as pl
+
+    from engine.actions.windows import Window
+    from engine.state.schema import frame_to_snapshots
+    sp = Path(states_path)
+    snaps = frame_to_snapshots(pl.read_parquet(sp))
+    kind_dir = sp.parents[2]                                     # <root>/states
+    a_path = kind_dir.parent / "actions" / sp.parent.parent.name / sp.parent.name / sp.name
+    w_path = kind_dir.parent / "windows" / sp.parent.parent.name / sp.parent.name / sp.name
+    if not a_path.is_file() or not w_path.is_file():
+        raise FileNotFoundError(f"{sp.stem}: actions / windows parquet missing next to the states")
+    acts = [Action.from_dict(r) for r in pl.read_parquet(a_path).iter_rows(named=True)]
+    wins = [Window(window_id=r["window_id"], round_num=r["round_num"], start_tick=r["start_tick"],
+                   end_tick=r["end_tick"], member_action_ids=tuple(r["member_action_ids"] or ()))
+            for r in pl.read_parquet(w_path).iter_rows(named=True)]
+    mv = snaps[0].ctx.map_version if snaps else None
+    return snaps, acts, wins, mv
+
+
+def _geometry_for(map_version: str | None):
+    from engine.maps import assets, callouts
+    from engine.state.geometry import MapGeometry
+    if not map_version:
+        raise ValueError("stored states carry no map_version")
+    map_name = map_version.split("@")[0]
+    try:
+        cos = callouts.load(map_name)
+    except (FileNotFoundError, ValueError):
+        cos = []
+    return MapGeometry.from_assets(assets.ensure(map_name), cos, map_version)
+
+
+def write_record(model_dir: Path, report: GateReport) -> Path:
+    """`<model_dir>/sanity_cf.json`: the verdict the registry checks before adopting."""
+    p = Path(model_dir) / GATE_FILE
+    p.write_text(json.dumps({"passed": bool(report.passed), "n_samples": report.n_samples,
+                             "created": report.created, "model": report.model,
+                             "tests": {k: bool(t.passed) for k, t in report.tests.items()},
+                             "failed": report.failed()}, indent=2, sort_keys=True), encoding="utf-8")
+    return p
+
+
+def gate_passed(model_dir: Path) -> bool | None:
+    """True / False from `<model_dir>/sanity_cf.json`, None when the gate never ran."""
+    p = Path(model_dir) / GATE_FILE
+    if not p.is_file():
+        return None
+    try:
+        return bool(json.loads(p.read_text(encoding="utf-8")).get("passed"))
+    except (OSError, ValueError):
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     """`engine sanity --counterfactual`. Exit 0 = gate green, 1 = a test failed,
-    2 = prerequisites missing (a trained model and held-out test states)."""
+    2 = prerequisites missing (a trained, calibrated model; stored states, actions and
+    windows under --states; map assets)."""
+    from engine import config, paths
+    from engine.data import layout
     ap = argparse.ArgumentParser(prog="engine sanity --counterfactual", description=__doc__.split("\n\n")[0])
-    ap.add_argument("--model", help="trained WP model checkpoint (P6)")
-    ap.add_argument("--states", help="held-out test states + actions to sample events from (P3/P4/P5)")
-    ap.add_argument("--out", default="eval/sanity_cf.md", help="markdown report path")
+    ap.add_argument("--model", help="WP model name under data/engine/models, or a model directory")
+    ap.add_argument("--states", default=None, help=f"engine data root holding states/ actions/ windows/ "
+                                                   f"(default {paths.ENGINE_DIR})")
+    ap.add_argument("--n-events", type=int, default=None, help="events to sample (default config sanity.cf_n_events)")
+    ap.add_argument("--n-drift", type=int, default=None, help="drift intervals to sample (default sanity.cf_n_drift)")
+    ap.add_argument("--max-matches", type=int, default=None, help="stop after this many stored matches")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--out", default=None, help="markdown report path (default eval/sanity_cf_<model>.md)")
     args = ap.parse_args(argv)
-    missing = [f"--{k} {getattr(args, k)!r} does not exist" if getattr(args, k) else f"--{k} not given"
-               for k in ("model", "states") if not getattr(args, k) or not Path(getattr(args, k)).exists()]
-    if missing:
-        print("sanity gate needs a trained WP model (P6) and held-out test states with their "
-              "actions (P3-P5); none exist on this machine:")
-        for m in missing:
-            print(f"  - {m}")
+    if not args.model:
+        print("sanity gate needs --model <wp_vN or model dir>")
         return 2
-    print("sampling 10,000 events / drift intervals from real test rounds needs the P4 window "
-          "grouping and the P5 dataset reader, which are not wired yet; call run_gate() with "
-          "samples directly")
-    return 2
+    model_dir = Path(args.model) if Path(args.model).is_dir() else paths.MODELS_DIR / args.model
+    if not model_dir.is_dir():
+        print(f"model directory not found: {model_dir.name}")
+        return 2
+    root = Path(args.states) if args.states else paths.ENGINE_DIR
+    states = layout.find("states", base=root) if (root / "states").is_dir() else []
+    if not states:
+        print(f"no stored states under {root / 'states'} (run build-states / build-actions first)")
+        return 2
+    cfg = config.load()
+    try:
+        from engine.model.predict import Predictor
+        predictor = Predictor(model_dir, "cpu" if args.cpu else None, require_calibration=True)
+    except FileNotFoundError as exc:
+        print(f"model directory incomplete: {Path(str(exc)).name}")
+        return 2
+    rng = random.Random(args.seed)
+    n_events = args.n_events if args.n_events is not None else cfg.sanity.cf_n_events
+    n_drift  = args.n_drift if args.n_drift is not None else cfg.sanity.cf_n_drift
+    samples: list[tuple] = []
+    geometry = None
+    for i, sp in enumerate(states):
+        if args.max_matches is not None and i >= args.max_matches:
+            break
+        try:
+            snaps, acts, wins, mv = _load_match(sp)
+        except FileNotFoundError as exc:
+            print(f"skipped: {exc}")
+            continue
+        if geometry is None or getattr(geometry, "map_version", None) != mv:
+            try:
+                geometry = _geometry_for(mv)
+            except Exception as exc:              # MapAssetError, missing release: a prerequisite
+                print(f"map geometry unavailable for {mv}: {type(exc).__name__}: {exc}")
+                return 2
+        samples += samples_from(snaps, acts, wins, rng=rng)
+    if not samples:
+        print("stored states yielded no gate samples (no windows with interventionable members)")
+        return 2
+    events = [s for s in samples if s[0] != "freeze"]
+    drift  = [s for s in samples if s[0] == "freeze"]
+    if len(events) > n_events:
+        events = rng.sample(events, n_events)
+    if len(drift) > n_drift:
+        drift = rng.sample(drift, n_drift)
+    samples = events + drift
+    ood = embed = None
+    if hasattr(predictor, "encode"):               # P7.2.7: a detector built here on the factual states
+        from engine.counterfactual.ood import OODDetector
+        factual = [s for smp in samples for s in (smp[1], smp[2])]
+        rng.shuffle(factual)
+        cut = max(1, len(factual) * 4 // 5)
+        embed = lambda snaps: predictor.encode(snaps)          # noqa: E731
+        ood = OODDetector(k=cfg.sanity.ood_k, percentile=cfg.sanity.ood_percentile).fit(embed(factual[:cut]))
+        if len(factual) > cut:
+            ood.calibrate(embed(factual[cut:]))
+    report = run_gate(predictor, samples, cfg, ood=ood, embed=embed, model=model_dir.name, geometry=geometry)
+    out = Path(args.out) if args.out else paths.EVAL_DIR / f"sanity_cf_{model_dir.name}.md"
+    write_report(report, out)
+    rec = write_record(model_dir, report)
+    print(f"{'PASS' if report.passed else 'FAIL'}: {report.n_samples} samples; report {out}; record {rec}")
+    if not report.passed:
+        print("failed tests: " + ", ".join(report.failed()))
+    return 0 if report.passed else 1
 
 
 if __name__ == "__main__":

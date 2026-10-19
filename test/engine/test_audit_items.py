@@ -105,6 +105,7 @@ def high_02() -> None:
     for name in ("wp_v7", "wp_v8"):
         (d / name).mkdir(); (d / name / "manifest.json").write_text("{}", encoding="utf-8")
         (d / name / "calibration.json").write_text("{}", encoding="utf-8")       # R6 gate (MED-20) satisfied
+        (d / name / "sanity_cf.json").write_text('{"passed": true}', encoding="utf-8")   # P7 gate (MED-16)
     try:
         rg.adopt("wp_v8", {"logloss": 0.46, "brier": 0.15, "ece": 0.012, "baseline_logloss": 0.49},
                  "beats wp_v3 on pro test", doc=doc, models_dir=d)
