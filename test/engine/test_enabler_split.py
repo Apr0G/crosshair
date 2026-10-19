@@ -75,6 +75,14 @@ sp = en.split([E("flash"), E("trade_setup")], 0.01, {0: 0.0, 1: 0.0}, ACFG)
 check("q = 0.01 < min_hazard -> band floors for every enabler",
       shares(sp) == [ACFG.other_share_band[0], lo] and "min_hazard" in sp.flags)
 check("q = 0.01: logged per enabler too", all("min_hazard" in s.flags for s in sp.shares))
+try:
+    sp = en.split([E("flash"), E("trade_setup")], 0.0, {0: 0.0, 1: 0.0}, replace(ACFG, min_hazard=0.0))
+    check("min_hazard = 0 and q = 0: band floors with the min_hazard flag, no ZeroDivisionError (LOW-27)",
+          shares(sp) == [ACFG.other_share_band[0], lo] and "min_hazard" in sp.flags
+          and all("min_hazard" in s.flags for s in sp.shares))
+except ZeroDivisionError as exc:
+    check("min_hazard = 0 and q = 0: band floors with the min_hazard flag, no ZeroDivisionError (LOW-27)",
+          False, f"{exc}")
 sp = en.split([E("flash")], float("nan"), {0: 0.1}, ACFG)
 check("NaN head -> floor, flagged hazard_nan", shares(sp) == [0.0] and "hazard_nan" in sp.flags)
 sp = en.split([E("trade_setup")], 0.4, {0: None}, ACFG)

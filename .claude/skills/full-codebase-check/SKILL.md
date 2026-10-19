@@ -9,8 +9,10 @@ An exhaustive, read-only audit of the whole Crosshair tree. It produces one date
 severity-ranked report and changes nothing else.
 
 This repo is public (`github.com/Apr0G/crosshair`), it holds a FACEIT API key, it drives
-Faig's **real Chrome profile**, and its database holds ~2.8 M events keyed to real Faceit
-player identities. The severity rubric below is written in those terms, not generic ones.
+Faig's **real Chrome profile**, and its data (`data/engine/engine.db`, demos, parsed
+tables) is keyed to real Faceit player identities. The severity rubric below is written in
+those terms, not generic ones. Since 2026-10-19 the code is the `engine/` package (plan
+Amendment 1); the legacy `src/` pipeline is deleted.
 
 ---
 
@@ -34,12 +36,12 @@ do not route around the guard with `python -c`, and do not ask a subagent to do 
 
 | Path | Why |
 |---|---|
-| `.env`, `*.env` | Live FACEIT API key. Public repo — a key in the report is a key on GitHub. |
+| `.env`, `.env*` (except `.env.example`), `env` | Live FACEIT API key. Public repo — a key in the report is a key on GitHub. |
 | `~/Library/Application Support/Google/Chrome/**` | Faig's real browser profile: cookies and live sessions for every site he's logged into. |
 | any browser profile dir | Same, whatever the OS path. |
-| `.venv/**` | Third-party code, not ours. Audit deps via metadata (rule below). |
-| `data/crosshair.db` | 3.6 GB, real player nicknames and IDs. **Schema only, via `PRAGMA table_info` / `.schema`. Never `SELECT` row contents.** |
-| `demos/*.dem` | Binary; embeds player names and Steam IDs. No audit value. |
+| `.venv/**`, `.venv-old311/**` | Third-party code, not ours (the second is the dead 3.11 venv). Audit deps via metadata (rule below). |
+| `data/**` | `data/engine/engine.db`, `data/engine/demos/`, parsed tables, models, logs, and the legacy `data/crosshair.db`: real player nicknames, Steam IDs and match ids. Never opened. The schema is audited from `engine/db.py`, not the file. |
+| `demos/**`, `*.dem`, `*.dem.zst`, `*.dem.gz` | Binary; embeds player names and Steam IDs. No audit value. |
 | `*.key`, `*.pem`, `id_rsa*`, `.netrc`, `~/.aws/**`, `~/.config/gh/**` | Credentials. |
 
 `.env.example` **is** in scope and must be read — it should contain only placeholders, and
@@ -63,7 +65,7 @@ never its contents.
 **4. Read files in full, end to end. No grep-and-skim.**
 
 `grep` is for locating a symbol before you read the file, never a substitute for reading it.
-`src/feature_extractor.py` is 1,351 lines and gets read start to finish like everything else;
+`engine/parse/awpy3_parser.py` is long and gets read start to finish like everything else;
 that is exactly where a `>=`-should-be-`>` hides. A file that is not read in full is reported
 as **unreviewed** in the Coverage table with a reason. It is never assumed fine, and never
 silently dropped.
@@ -92,33 +94,40 @@ find .claude/skills -type f 2>/dev/null
 
 **In scope for this repo:**
 
-- **Python source** — `src/**/*.py`, `test/**/*.py`. Every one, in full.
-- **Dependency + packaging manifests** — `requirements.txt`, `pyproject.toml`.
+- **Python source** — `engine/**/*.py`, `test/**/*.py`, `bench/**/*.py`. Every one, in
+  full, including git-ignored modules that exist on disk (check `git status --ignored`).
+- **Engine data files** — `engine/config.yaml`, `engine/maps/**`, `engine/report/schema.json`,
+  `engine/state/*.yaml`, `bench/budget.yaml`, `test/engine/fixtures/**`.
+- **Dependency + packaging manifests** — `requirements-engine.txt`,
+  `requirements-engine.lock`, `pyproject.toml`.
 - **Config and repo hygiene** — `.gitignore`, `.env.example`.
 - **Agent config** — `.claude/settings.json`, `.claude/settings.local.json`, and
-  `.claude/skills/**` (including this skill's own files). These are **gitignored**, so
-  `git ls-files` misses them — add them explicitly or the audit's own instrument goes
+  `.claude/skills/**` (including this skill's own files). `.claude/settings*.json` are
+  **gitignored** (the skills are re-included), so `git ls-files` misses the settings —
+  add them explicitly or the audit's own instrument goes
   unreviewed. A permission allowlist that is broader than it needs to be is a real finding.
-- **Docs and process claims** — `README.md`, `CLAUDE.md`, `PROMPT_faceit_api_downloader.md`.
+- **Docs and process claims** — `README.md`, `CLAUDE.md`, `docs/**` (except earlier
+  audits in `docs/reviews/`, which are history).
   Audited for **contradicting the code**, not for prose quality. A README documenting a CLI
   flag that no longer parses, or a CLAUDE.md invariant the code violates, is a finding.
   Typos and tone are not.
 
 **Out of scope:**
 
-- `.venv/**`, and any vendored or generated code. Audit third-party risk from **metadata
-  instead**: read `requirements.txt` / `pyproject.toml`, list every dependency with its
+- `.venv/**`, `.venv-old311/**`, `data/**`, and any vendored or generated code. Audit
+  third-party risk from **metadata instead**: read `requirements-engine.txt` / the lock /
+  `pyproject.toml`, list every dependency with its
   version constraint, flag unpinned ranges, and check installed versions against known
   advisories via `pip list --outdated` or `pip-audit` **if already installed** — never
   `pip install` a tool to run the audit.
 - Build output, `__pycache__/`, `*.pyc`, `dist/`, `build/`, `*.egg-info/`.
-- Binaries: `demos/*.dem`, `data/*.lgb`, `.DS_Store`.
+- Binaries: `demos/**`, `*.dem*`, `*.lgb`, `.DS_Store`.
 - Everything in Non-negotiable 2.
 
 **Record the in-scope file count now.** Phase 4 reconciles files-read against it, and the
-two numbers must agree or the gap must be named file by file. As of 2026-08-01 the expected
-count is ~25 (18 tracked + 3 untracked + `.claude/settings.json` + this skill's files) —
-recompute it, do not trust that number.
+two numbers must agree or the gap must be named file by file. On 2026-10-19 the count was
+252 (242 tracked + 7 git-ignored `engine/data/*.py` + this skill's 3 files) — recompute
+it, do not trust that number.
 
 ---
 
@@ -127,39 +136,48 @@ recompute it, do not trust that number.
 Read these before dispatching. Generic CWEs are the floor; **violations of Faig's own rules
 are the highest-yield findings**, and a generic checklist misses all of them.
 
-1. **`CLAUDE.md`** — the primary rule source. Extract the invariants and carry them into
-   every shard prompt. The standing set (re-derive, don't trust this list — the file changes):
+1. **`CLAUDE.md`** — the primary rule source; its **Engine v2** section binds (sections
+   marked obsolete are history). Extract the invariants and carry them into every shard
+   prompt. The standing set, as numbered in the 2026-10-19 report (re-derive, don't trust
+   this list — the file changes):
 
    | ID | Invariant |
    |---|---|
-   | P1 | No path may double-insert a match. Dedup is `db.is_processed`, checked for **both** `<mid>` and `<mid>_m1` id forms. |
-   | P2 | Both ingestion sources produce identical downstream rows; they differ only in how the `.dem` reaches disk. |
-   | P3 | All ingestion converges on the seam `pipeline.ingest_demo` → `db.store_match`. No forked pipeline. |
-   | P4 | A source module exposes exactly `iter_unprocessed_demos(...)` and `download_demo(url, dest)`. |
-   | P5 | Impact sign: `p_after - p_before` for a CT actor, negated for T. |
-   | P6 | WP split is `GroupShuffleSplit(groups=match_id)` — never a random row split (leaks future round state). |
-   | P7 | WP probabilities must stay **calibrated**, not merely well-ranked; `test/test_win_probability.py` must pass. |
-   | P8 | A new WP feature requires all four: `state_sampler` emits it → `db` column + insert → `win_probability.FEATURES` → retrain. |
-   | P9 | DB changes additive-only, with a migration. `_init_schema` cannot add columns to an existing DB. |
-   | P10 | Secrets via env/`.env` only. Never hardcoded, never committed. |
-   | P11 | No invented FACEIT API fields or endpoints. |
-   | P12 | `src/scraper.py` (Playwright) is load-bearing and ask-before-touch. |
-   | P13 | `/security-review` runs before every commit. |
-   | P14 | Tests stay plain scripts, not pytest (decided 2026-08-01). |
-   | P15 | `.venv/bin/python` (3.11 arm64); `requirements.txt` is authoritative, `pyproject.toml` is stale. |
+   | R1 | Every source ends at `engine.ingest.register_demo`; `db.is_processed_any` checks both id forms; never double-insert; UNIQUE `demo_sha256` backstop. |
+   | R2 | All sources produce identical downstream rows and expose `iter_unprocessed_demos` / `download_demo`. |
+   | R3 | CT-positive sign convention, flipped once per T actor. |
+   | R4 | Frozen month splits with match grouping; never a random row split; split files superseded, never edited. |
+   | R5 | Every feature has a `LIVE_SAFE` justification (`engine/state/schema.py`); leakage audit in `test_leakage.py`. |
+   | R6 | Calibrated probabilities: ECE ≤ 0.02 on the baseline test tier. |
+   | R7 | Never `0` / `"?"` for unknown where they are legitimate values: `None` / NULL / NaN. |
+   | R8 | `or` is not a null-coalesce over numerics (`_nan` / `_first_valid`). |
+   | R9 | Credential-bearing URLs redacted before any print / exception / file / DB write; never truncate a URL by length. |
+   | R10 | Tick rate from the demo header, never a literal; quarantine refuses non-128. |
+   | R11 | No invented FACEIT API fields or endpoints. |
+   | R12 | Additive DB migrations keyed by `PRAGMA user_version`; a newer file is refused; schema changes ask-first. |
+   | R13 | Never change `sample_hz` for latency. |
+   | R14 | Reports never contain outside paths or URLs; SteamIDs hashed unless `--show-ids`. |
+   | R15 | Modules that do not train or predict never import torch at import time. |
+   | R16 | Plain-script tests (never pytest), exit 0/1/2, write only to temp dirs, every module has a test script. |
+   | R17 | Secrets via env + `.env`; never hardcoded or committed. |
+   | R18 | `engine/sources/scraper.py` logic unchanged; ask before touching. |
+   | R19 | A model is used only if adopted in `docs/ENGINE_MODELS.md`; `analyze` refuses otherwise; P7 gate before attribution. |
+   | R20 | Style: absolute imports, `# ── section ──` banners, type hints, plan-step docstrings. |
+   | R21 | Conservation identity; C1 exact zero on a shared tick; C2 `V = B + D + X`, `R ≤ 0`. |
+   | R22 | Exit codes 0 ok / 1 failed / 2 usage or prerequisite, everywhere. |
 
 2. **`README.md`** — the public claims. Anything it asserts about behaviour is a testable
    claim against the code.
-3. **`PROMPT_faceit_api_downloader.md`** — the spec the API path was built to. Its hard
-   rules (no Playwright changes, additive-only schema, identical downstream results, dedup
-   before download) are auditable requirements, not history.
+3. **`docs/ENGINE_PLAN.md`** (with its amendments) and the other `docs/ENGINE_*.md` —
+   the spec the engine is built to. Their hard rules (decision gates, acceptance tests
+   C1–C3, the seam, ask-before items) are auditable requirements, not history.
 4. **`references/checklist.md`** — this skill's substantive checklist. Load it in full into
    every shard agent.
 5. **Domain knowledge — no skill exists for this, and it is a real gap.** Business-logic
    correctness here is invisible without CS2 knowledge: round phases and freeze time, the
-   40 s bomb timer, 5 s/10 s defuse with and without kit, 64-tick demos, `ct`/`t` side
-   naming, equipment values, and the tuned constants (`_SMOKE_RADIUS = 144.0`,
-   `SITE_BLOCK_RADIUS = 300.0`, `_SOUND_RANGES`). Section J of the checklist carries this
+   40 s bomb timer, 5 s/10 s defuse with and without kit, 128-tick demos (64-tick refused),
+   `ct`/`t` side naming, equipment values, and the tuned constants in `engine/config.yaml`
+   (clock, buy bands, trade window, smoke / utility lifetimes). Section J of the checklist carries this
    inline. **Mark any finding that turns on a game-mechanics constant as
    `confidence: needs-domain-review`** rather than asserting it — and note in the report
    that a CS2 domain reference would raise the audit's ceiling.
@@ -171,19 +189,21 @@ are the highest-yield findings**, and a generic checklist misses all of them.
 One read-only subagent per shard, dispatched in **parallel batches**. Every in-scope file
 lands in **exactly one** shard. Before dispatching, re-derive this table from the actual
 Phase 0 file list and verify the partition: no file in two shards, no in-scope file in none.
-The table below is the layout as of 2026-08-01 — treat it as a starting point, not gospel.
+The table below follows the engine module map (CLAUDE.md) as of 2026-10-19 — treat it as a
+starting point, not gospel; split a shard that grows past what one agent reads in full.
 
 | Shard | Files | Focus |
 |---|---|---|
-| **S1 — Ingestion & network** | `src/scraper.py`, `src/faceit_api.py` | The secret-handling boundary. API key in headers/logs/tracebacks; the **real Chrome profile** launch; download path construction and decompression (path traversal via `dest`, zip/zstd bombs, partial writes); TLS; 429/403 handling; signed-URL expiry and re-exchange; rate limits vs ToS. Highest-stakes shard. |
-| **S2 — Orchestration & CLI** | `src/main.py`, `src/pipeline.py` | SQL assembled with f-strings from CLI arguments; argparse surface; blanket `except Exception` that swallows real failures; exit codes; secrets reaching stdout in error paths; the `--source` seam selection. |
-| **S3 — Persistence** | `src/db.py` | P1/P3/P9. Dedup and idempotency; schema vs what writers actually insert; transaction and commit boundaries; connection-per-call behaviour; the JSON encoder; parameterisation of every insert. |
-| **S4 — Feature extraction** | `src/feature_extractor.py` | 1,351 lines, read in full. Off-by-ones in tick slicing and windows; side/name mapping; visibility and sound-cue precompute; grenade attribution; `None`/NaN handling; silent `except: pass`. |
-| **S5 — Parsing & sampling** | `src/extract.py`, `src/state_sampler.py` | awpy surface assumptions and missing-table fallbacks; round boundary derivation (`freeze_end` / `official_end`); bomb-plant-to-round matching; per-state field completeness vs P8. |
-| **S6 — Model & scoring** | `src/win_probability.py`, `src/score_impact.py` | P5/P6/P7/P8. Leakage in the split; `FEATURES` vs DB columns vs sampler output; the `bisect` bracketing in `_impact_for_event` (off-by-one on exact-tick events); impact sign; calibration; model-file trust. |
-| **S7 — Tests** | `test/*.py` | Tests that assert the wrong thing, pass vacuously, or assert nothing; **module-level side effects at import**; anything writing to the production DB; and which of P1–P15 have **no** test coverage at all. |
-| **S8 — Config, deps, agent config** | `requirements.txt`, `pyproject.toml`, `.gitignore`, `.env.example`, `src/__init__.py`, `.claude/settings.json`, `.claude/skills/**` | Does `.gitignore` actually cover `.env`, the DB, and demos? Unpinned deps and known advisories via metadata; requirements-vs-pyproject divergence; over-broad permission allowlist entries; stale allowlist entries naming files that no longer exist. |
-| **S9 — Docs vs reality** | `README.md`, `CLAUDE.md`, `PROMPT_faceit_api_downloader.md` | Every claim tested against code: documented CLI flags that no longer parse, stated invariants the code violates, setup steps that fail, performance/accuracy numbers presented as current. Contradictions only — not prose. |
+| **S1 — Sources & network** | `engine/sources/**` | The secret-handling boundary. API key in headers/logs/tracebacks; the **real Chrome profile** launch (R18: report, never change); download path construction and decompression (path traversal, zip/zstd bombs, partial writes); 429/403 handling; signed-URL expiry; rate limits vs ToS. Highest-stakes shard. |
+| **S2 — CLI, seam & persistence** | `engine/cli.py`, `engine/ingest.py`, `engine/db.py`, `engine/paths.py`, `engine/manifest.py`, `engine/log.py`, `engine/config.py` (+ `config.yaml`) | R1/R9/R12/R22. Dedup and idempotency; transactions; migrations; argparse surface and exit codes; redaction; config validation. |
+| **S3 — Parsing & maps** | `engine/parse/**`, `engine/maps/**` | awpy 3 surface assumptions; tick rate from the header (R10); round boundaries; unknowns as null (R7). |
+| **S4 — State** | `engine/state/**` | LIVE_SAFE and leakage (R5); geometry and LOS; per-player tokens; `or` over numerics (R8). |
+| **S5 — Actions & data** | `engine/actions/**`, `engine/data/**` | Action windows; splits (R4); dataset fitting on train rows only; quarantine. |
+| **S6 — Model** | `engine/model/**` | Calibration (R6); torch imports (R15); training / prediction parity; the LightGBM yardstick. |
+| **S7 — Counterfactual & attribution** | `engine/counterfactual/**`, `engine/attribution/**` | Interventions on copies; Shapley exactness; conservation and C1 (R21); sign convention (R3). |
+| **S8 — Value, report, evaluation, analyze** | `engine/value/**`, `engine/report/**`, `engine/evaluation/**`, `engine/analyze.py` | C2 (R21); report redaction (R14); adoption gate (R19). |
+| **S9 — Tests & bench** | `test/**`, `bench/**` | Vacuous or wrong assertions; module-level side effects; anything writing outside temp dirs; which of R1–R22 have **no** test (R16). |
+| **S10 — Config, deps, agent config, docs** | `requirements-engine.*`, `pyproject.toml`, `.gitignore`, `.env.example`, `.claude/skills/**`, `README.md`, `CLAUDE.md`, `docs/**` | `.gitignore` coverage of `.env*`, `data/`, demos; deps via metadata; packaging; docs contradicting the code (CLI lines that no longer parse, invariants the code violates). Contradictions only — not prose. |
 
 **Cross-shard reading.** An agent may read outside its shard for **context** — a helper's
 definition, a caller's guard, the schema a query targets — and should, because a finding
@@ -204,7 +224,7 @@ field and S3 owns the finding. This is what keeps duplicates out.
 | `failure` | Concrete: *given state X, Y happens*. Preconditions named. Not "could be unsafe" |
 | `fix` | Prose. **Not applied.** No diffs |
 | `confidence` | `high` \| `medium` \| `needs-domain-review` |
-| `rule_violated` | `P1`–`P15` where applicable, else `null` |
+| `rule_violated` | `R1`–`R22` where applicable, else `null` |
 
 **And per agent:** `files_read` (every path, read in full), `files_skipped` (path + reason),
 `lines_reviewed`, and `cross_shard_notes`. Phase 4 reconciles coverage from these — an agent
@@ -222,8 +242,9 @@ because it trains Faig to distrust the report.
 
 Common refutations in *this* codebase, check each explicitly:
 
-- **The guard exists one layer up.** `pipeline.run` wraps `process_one` in `try/except`;
-  `main.py` validates before calling. A "crash" that is caught and logged is not a crash.
+- **The guard exists one layer up.** `engine.ingest.run` wraps `process_one` in
+  `try/except`; `engine/cli.py` validates before calling. A "crash" that is caught and
+  logged is not a crash.
 - **The value is sanitised upstream.** IDs come from the FACEIT API, not user input;
   `argparse` `choices=` already constrains `--source`, `--by`, and `--side` to a fixed set,
   so an "injection" through those is not reachable.
@@ -233,9 +254,9 @@ Common refutations in *this* codebase, check each explicitly:
   the fact that the pipeline is single-threaded and processes one match at a time.
 - **The input is validated by the schema layer on the way in.** A column typed `INTEGER`,
   or a value that `state_sampler` can only ever emit as `0`/`1`.
-- **The "missing" column exists in the live DB.** `db.py`'s `_init_schema` and
-  `data/crosshair.db` have drifted in **both** directions — confirm which artefact the
-  finding is actually about before asserting it.
+- **The "missing" column exists after migration.** `engine/db.py`'s `_init_schema` and
+  `_MIGRATIONS` together define the schema; the DB file itself is a blocked path, so a
+  schema finding is about the code, never the file.
 - **The constant is correct for CS2.** Do not call a game-mechanics number wrong without
   domain grounding; downgrade to `needs-domain-review`.
 
@@ -282,14 +303,14 @@ exposure, and a FACEIT ToS ban killing the pipeline.**
   anywhere destined for the public repo.
 - Arbitrary code or command execution from a downloaded demo, a signed URL, or an API
   response — including path traversal that writes outside the temp dir during decompression.
-- Silent, unrecoverable destruction of `data/crosshair.db` (710 matches; re-scraping is
-  days of work and some demos are no longer available).
+- Silent, unrecoverable destruction of `data/engine/engine.db` or the demo store
+  (FACEIT keeps demos about 30 days; a lost demo cannot be downloaded again).
 
 **HIGH** — exploitable with a precondition, or silent wrongness, or a documented rule broken:
-- Any P1–P15 violation without a live exploit path. **A broken invariant is HIGH here even
-  when nothing exploits it** — P1 (double-insert) silently poisons the training set, and
-  P6 (split leakage) silently invalidates every downstream number.
-- Silent data corruption: double-inserted matches, mis-signed impact (P5), events scored
+- Any R1–R22 violation without a live exploit path. **A broken invariant is HIGH here even
+  when nothing exploits it** — R1 (double-insert) silently poisons the training set, and
+  R4 / R5 (split or feature leakage) silently invalidate every downstream number.
+- Silent data corruption: double-inserted matches, mis-signed value (R3), events scored
   against the wrong round's states.
 - Scraping behaviour likely to trip FACEIT automation detection and get the account banned
   — request volume, missing backoff, absent jitter.

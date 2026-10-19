@@ -110,9 +110,16 @@ def test_parse(tmp: Path) -> None:
           statuses(again) == {"m1": "skipped", "m2": "skipped"})
     check("rerun leaves no failures", not (out_dir / worker.FAILURES_NAME).exists())
 
+    # Back-date the manifest so a rewrite is visible even within the same second
+    # (created_at has 1 s resolution; LOW-65: ">=" passed for an untouched manifest).
+    stale = {**man, "created_at": "2000-01-01T00:00:00+00:00", "extra": {**man["extra"], "stale": True}}
+    (m1 / "manifest.json").write_text(json.dumps(stale), encoding="utf-8")
     forced = worker.run(demos, out_dir=out_dir, procs=1, parser=fake_parse, force=True, header_fn=fake_header)
     check("--force reparses", statuses(forced) == {"m1": "parsed", "m2": "parsed"})
-    check("--force rewrote the manifest", manifest.read(m1)["created_at"] >= created)
+    new = manifest.read(m1)
+    check("--force rewrote the manifest (back-dated copy replaced)",
+          new["created_at"] > stale["created_at"] and new["created_at"] >= created and "stale" not in new["extra"],
+          f"{new['created_at']}")
 
 
 def test_failures(tmp: Path) -> None:

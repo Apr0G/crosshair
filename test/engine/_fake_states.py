@@ -205,8 +205,9 @@ def make_round(n_snapshots: int, seed: int, ct_wins: bool, tick_rate: int = 128,
             alive_ct=n_ct, alive_t=n_t,
             equip_ct=float(sum(equip[i] for i in range(5) if alive[i])),
             equip_t=float(sum(equip[i] for i in range(5, 10) if alive[i])),
-            money_ct=float(sum(money[i] for i in range(5) if alive[i])),
-            money_t=float(sum(money[i] for i in range(5, 10) if alive[i])),
+            # every roster account, dead players included (the builder's definition, HIGH-05)
+            money_ct=float(sum(money[i] for i in range(5))),
+            money_t=float(sum(money[i] for i in range(5, 10))),
             loss_streak_ct=round_num % 3, loss_streak_t=0,
             score_ct=score_ct, score_t=score_t, round_num=round_num, half=1 if round_num <= 12 else 2,
             is_overtime=0, n_active_smokes=sum(u.kind == "smoke" for u in utility),
@@ -218,8 +219,11 @@ def make_round(n_snapshots: int, seed: int, ct_wins: bool, tick_rate: int = 128,
                 enemy = sides[i] != sides[j]
                 both  = alive[i] and alive[j]
                 d     = float(math.dist(pos_now[i], pos_now[j]))
+                # los: alive enemy pairs only; smoke_between: alive pairs only, NaN otherwise
+                # (as engine/state/pairwise.py writes them; LOW-64)
                 vals  = (float((los_seed[i, j] + si // 4) % 2) if enemy and both else np.nan,
-                         d, d * 1.15, float(both and los_seed[j, i] == 1 and bool(active)),
+                         d, d * 1.15,
+                         float(los_seed[j, i] == 1 and bool(active)) if both else np.nan,
                          float(not enemy))
                 pair[i, j] = pair[j, i] = vals
 

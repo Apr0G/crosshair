@@ -39,6 +39,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from engine import manifest, paths
+from engine.value import _paths
 from engine.value.descriptors import FIELDS, PAD, DescriptorVocab, ids_from_frame
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -95,16 +96,7 @@ def side_bits(side) -> np.ndarray:
     return out
 
 
-def h_matrix(frame: pl.DataFrame, column: str = "h_pre") -> np.ndarray:
-    """float32[n, d_h] from the frame's `h_pre` list column; raises on nulls or ragged rows."""
-    s = frame[column]
-    if s.null_count():
-        raise ValueError(f"{column}: {s.null_count()} null embedding(s); fill h_pre before P9")
-    rows = s.to_list()
-    d = {len(r) for r in rows}
-    if len(d) > 1:
-        raise ValueError(f"{column}: ragged embeddings, lengths {sorted(d)}")
-    return np.asarray(rows, dtype=np.float32).reshape(len(rows), d.pop() if d else 0)
+h_matrix = _paths.h_matrix                      # moved to the torch-free _paths (LOW-32); old name kept
 
 
 # ── networks ──────────────────────────────────────────────────────────────────
@@ -207,10 +199,7 @@ def predict_b(model: BNet, h, tier, side, *, batch_size: int = 65536) -> np.ndar
 
 # ── training ──────────────────────────────────────────────────────────────────
 
-def next_version_dir(parent: Path, prefix: str) -> Path:
-    parent = Path(parent)
-    have = [int(p.name[len(prefix):]) for p in parent.glob(f"{prefix}*") if p.name[len(prefix):].isdigit()]
-    return parent / f"{prefix}{max(have, default=0) + 1}"
+next_version_dir = _paths.next_version_dir      # moved to the torch-free _paths (LOW-32); old name kept
 
 
 def _seed_all(seed: int) -> None:

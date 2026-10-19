@@ -1,7 +1,8 @@
 # Engine CLI
 
 `python -m engine.cli <command> [options]` (Windows: `.venv\Scripts\python.exe -m engine.cli ...`;
-`pyproject.toml` also registers the `crosshair` console script). Plan reference: P10.1,
+`pyproject.toml` also registers the `crosshair` console script, installed by
+`pip install -e .`). Plan reference: P10.1,
 Amendment 1. Implementation: `engine/cli.py`, `engine/analyze.py`, `engine/report/`.
 
 ## Common behaviour
@@ -33,9 +34,13 @@ Common options (every command):
 | 0 | done |
 | 1 | the command ran and failed (failed parses, a failed check, an unexpected error) |
 | 2 | usage error (no command at all prints the overview and exits 0) or missing prerequisite: missing file, bad argument, bad config, no model / model not adopted, unfinished module, refused demo (quarantine, not 128-tick), not enough disk space |
-| 130 | interrupted |
 
-Errors print one redacted line and no traceback (`--debug` adds it; the log file always has it).
+No other code is ever returned (LOW-04): Ctrl-C prints `interrupted` and exits 1, and a
+delegated module or bench script that returns anything outside 0/1/2 exits 1 with a
+warning naming the original code.
+
+Errors print one redacted line and no traceback (`--debug` adds the redacted traceback;
+the log file always has it).
 
 ### Environment variables
 
@@ -264,7 +269,7 @@ python -m engine.cli sanity --model wp_v1 [--counterfactual]
 `--counterfactual` runs the P7.2 gate (`engine.counterfactual.sanity`) over the stored
 states, actions and windows (default root `data/engine`; `-- --states <root>`,
 `--max-matches`, `--n-events`, `--n-drift`, `--seed` pass through) with the map's real
-geometry, writes `eval/sanity_cf_<model>.md` and `<model dir>/sanity_cf.json`, and
+geometry, writes `data/engine/eval/sanity_cf_<model>.md` and `<model dir>/sanity_cf.json`, and
 exits 0 when green, 1 on a failed test, 2 when the model, its calibration, the states
 or the map assets are missing. Adoption (`registry adopt`) requires the green record.
 Without `--counterfactual` the P6.6 model sanity (`engine.model.sanity`, not written
@@ -273,7 +278,8 @@ yet: exit 2).
 ### `review`
 
 Delegates to `engine.evaluation.review.main` (P11.2): picks the review rounds, writes
-`eval/review_round_<i>/`, keeps `eval/review_log.md`, and lists the disagree items.
+`data/engine/eval/review_round_<i>/`, keeps `data/engine/eval/review_log.md`, and lists
+the disagree items.
 
 ```
 python -m engine.cli review --scored actions_scored.parquet [--actions a.parquet] [--states s.parquet] [--n 20] [--seed 1337] [--cycle 1]
@@ -319,15 +325,21 @@ python -m engine.cli status
 Discover, download and register demos from a source (`engine.ingest.run`).
 
 ```
-python -m engine.cli scrape [--source api|playwright|hltv|hf] [--max N] [--tier T] [--min-level 10] [--min-elo 2500] [--region EU]
+python -m engine.cli scrape [--source api|playwright|hltv|hf] [--max N] [--tier T] [--min-level 10] [--min-elo 2500] [--region EU] [--repo owner/name]
 ```
 
-Refused below 20 GB free. Exit 1 when any match failed.
+Refused below 20 GB free. Exit 1 when any match failed. `--source api` and `playwright`
+need `FACEIT_API_KEY` (exit 2 without it); `--source hf` needs `--repo` (the Hugging
+Face archive, no default; exit 2 without it) and registers as tier `pro` unless
+`--tier` says otherwise. A key without Downloads access stops the run at the first
+match (the 403 is not retried per match). `hltv` is dormant (site terms) and takes its
+match list only from Python (`ingest.run("hltv", matches=[...])`).
 
 ### `ingest`
 
 Register one local demo through the seam (`engine.ingest.register_demo`): copy under
-`data/engine/demos/<tier>/`, `matches` + `processed` rows.
+the tier's directory (`data/engine/demos/pro`, `demos/faceit` for `faceit_10`,
+`demos/golden`), `matches` + `processed` rows.
 
 ```
 python -m engine.cli ingest <demo.dem> [--match-id ID] [--tier pro|faceit_10|golden] [--source local]
@@ -342,7 +354,9 @@ applies to the win model (`--model` / `--model-dir`) and to the value models
 (`--q-model` and `--neighbours`) alike; with `--allow-unadopted` each unadopted one
 adds a `model_unadopted` warning to the report. A model counts as adopted when the
 adoption table of `docs/ENGINE_MODELS.md` has a row whose model cell is its directory
-name (for example `wp_v3`) and whose status cell is `adopted`. Rows are added with
+name (for example `wp_v3`) and whose status cell is `adopted`, and only for that
+directory under `data/engine/models/` (a same-named copy elsewhere needs
+`--allow-unadopted`). Rows are added with
 `python -m engine.evaluation.registry adopt ...`, never by hand; the table header is
 
 ```

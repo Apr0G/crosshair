@@ -4,8 +4,12 @@ versions never overwritten, holdout maps, file hash.
 
     .venv\\Scripts\\python.exe test\\engine\\test_splits.py
 """
+import contextlib
+import io
+import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from _harness import check, section, summary
@@ -76,6 +80,46 @@ def main() -> int:
             check(f"refuses {why}", True)
     check("custom month counts", splits.assign(rows, n_test_months=1, n_val_months=1)["months"]["train"]
           == ["2026-01", "2026-02", "2026-03", "2026-04"])
+    try:
+        splits.assign(rows + [rows[3], rows[3], rows[0]])
+        check("duplicate check names every duplicated key once, sorted (LOW-35)", False)
+    except ValueError as exc:
+        check("duplicate check names every duplicated key once, sorted (LOW-35)",
+              str(exc).endswith(str(sorted({rows[0]["match_key"], rows[3]["match_key"]}))), str(exc))
+    big = [{"match_key": f"m{i}", "date": f"2026-{1 + i % 6:02d}-01", "map": "de_mirage"} for i in range(50_000)]
+    t0 = time.perf_counter()
+    try:
+        splits.assign(big + [big[7]])
+    except ValueError:
+        pass
+    dt = time.perf_counter() - t0
+    check("duplicate check is linear: 50k rows in < 1 s (was O(n^2))", dt < 1.0, f"{dt:.2f} s")
+
+    section("CLI (LOW-35)")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc_none = splits.main(["--out", str(out / "cli")])
+        rc_missing = splits.main(["--catalog", str(out / "no_such_catalog.json"), "--out", str(out / "cli")])
+    check("no --catalog / --db -> exit 2", rc_none == 2)
+    check("missing catalog file -> exit 2", rc_missing == 2 and not (out / "cli").exists())
+    cat = out / "catalog.json"
+    cat.write_text(json.dumps(rows), encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = splits.main(["--catalog", str(cat), "--out", str(out / "cli"), "--holdout-maps", "de_nuke"])
+    sc = splits.load(out / "cli" / "splits_v1.json") if rc == 0 else {}
+    check("--catalog JSON writes splits_v1.json with the holdout", rc == 0 and sc["holdout_maps"] == ["de_nuke"]
+          and sc["months"]["test"] == ["2026-05", "2026-06"])
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    lay = [{"match_key": r["match_key"], "month": r["date"][:7] if r["date"] else None,
+            "map_version": f"{r['map']}@1"} for r in rows if r["match_key"] != "baddate"]
+    pq.write_table(pa.Table.from_pylist(lay), out / "catalog.parquet")
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = splits.main(["--catalog", str(out / "catalog.parquet"), "--out", str(out / "cli"),
+                          "--holdout-maps", "de_nuke"])
+    sp2 = splits.load(out / "cli" / "splits_v2.json") if rc == 0 else {}
+    check("layout catalog.parquet (month / map_version) gives the same splits", rc == 0
+          and sp2["splits"] == sc["splits"] and sp2["undated"] == ["nodate"])
     return summary()
 
 

@@ -12,13 +12,13 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-import torch
 
-from _harness import check, section, skip, summary
-from _value_states import D_TOY, device, split_by_match, synthetic_corpus
-from engine import config
-from engine.value import q_model as qm
-from engine.value.descriptors import FIELDS, DescriptorVocab, ids_from_frame
+from _harness import check, require, section, skip, summary
+torch = require("torch", "needs the platform torch build (docs/ENGINE_ENV.md)")   # LOW-61
+from _value_states import D_TOY, device, split_by_match, synthetic_corpus  # noqa: E402
+from engine import config  # noqa: E402
+from engine.value import q_model as qm  # noqa: E402
+from engine.value.descriptors import FIELDS, DescriptorVocab, ids_from_frame  # noqa: E402
 
 DEV = device()
 cfg = config.load()

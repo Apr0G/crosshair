@@ -28,6 +28,7 @@ Filled by: P12.1.
 """
 import argparse
 import json
+import os
 import re
 from datetime import date
 from pathlib import Path
@@ -181,7 +182,13 @@ def adopt(name: str, numbers: dict, rule: str, *, doc: Path | None = None, when:
     row = "| " + " | ".join([when or date.today().isoformat(), name, kind_of(name),
                              *(_cell(numbers.get(k)) for k in NUMBER_KEYS), rule, "adopted"]) + " |"
     lines.insert(b[1], row)
-    doc.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")     # repo file: keep LF
+    tmp = doc.with_name(doc.name + ".tmp")         # atomic: temp file next to it, then replace (LOW-40)
+    try:
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")     # repo file: keep LF
+        os.replace(tmp, doc)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return row
 
 

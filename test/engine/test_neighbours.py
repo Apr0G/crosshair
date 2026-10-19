@@ -12,10 +12,11 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from _harness import check, section, summary
-from _value_states import side_table, synthetic_corpus
-from engine.value import neighbours as nb
-from engine.value.descriptors import DescriptorVocab
+from _harness import check, require, section, summary
+require("faiss", "the neighbour index needs faiss-cpu (requirements-engine.txt)")   # LOW-61
+from _value_states import side_table, synthetic_corpus  # noqa: E402
+from engine.value import neighbours as nb  # noqa: E402
+from engine.value.descriptors import DescriptorVocab  # noqa: E402
 
 K = 200
 frame, h = synthetic_corpus(4000, seed=5, n_matches=40, maps=("de_test@a", "de_test@b"))

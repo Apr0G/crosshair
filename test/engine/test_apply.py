@@ -15,7 +15,7 @@ import numpy as np
 
 from _harness import check, section, summary
 from _cf_states import (action, good_win, make_flash_pair, make_kill_pair, make_move_pair,
-                        make_plant_pair, make_smoke_pair, make_window)
+                        make_plant_pair, make_smoke_pair, make_window, pair_states)
 
 from engine.counterfactual import apply as ap
 from engine.counterfactual.apply import UNTOUCHABLE, apply, coalition_states, edit_hash
@@ -123,6 +123,30 @@ for m in members:
     a, _ = apply(w_pre, w_post, members, {m.action_id})
     b, _ = apply(w_pre, w_post, members, {m.action_id}, order="forward")
     check(f"only {m.type} kept: reverse == forward", a == b)
+
+# ── damage by A + kill by B on one victim (LOW-28) ────────────────────────────
+section("damage by A, kill by B, one victim (LOW-28)")
+
+dk_pre, dk_post = pair_states({}, {"dead": {202}, "kills": {101: 1}, "damage": {101: 60, 102: 40}})
+dk = [action("damage", 102, victim_id=202, damage_total=40.0, armor_damage=0.0),
+      action("kill", 101, victim_id=202, victim_health_before=60.0)]
+dk[0].tick, dk[0].state_pre_tick = 4999, 4998           # the hit lands one tick before the kill
+all_identity("damage+kill", dk_pre, dk_post, dk)
+empty_identity("damage+kill", dk_pre, dk_post, dk)
+for order in ("reverse", "forward", "shuffle:3"):
+    e, _ = apply(dk_pre, dk_post, dk, set(), order=order)
+    pa = e.players[e.index_of(102)]
+    check(f"apply(empty, {order}): A's damage_round back to s_pre (not left at 40)",
+          pa.damage_round == dk_pre.players[dk_pre.index_of(102)].damage_round, f"{pa.damage_round}")
+ko, _ = apply(dk_pre, dk_post, dk, {dk[1].action_id})
+check("only the kill kept: victim dead, A's damage_round back to s_pre, B keeps the kill",
+      ko.players[ko.index_of(202)].alive == 0 and ko.players[ko.index_of(102)].damage_round == 0.0
+      and ko.players[ko.index_of(101)].kills_round == 1)
+do, _ = apply(dk_pre, dk_post, dk, {dk[0].action_id})
+check("only the damage kept: A keeps 40, B back to 0 kills / 0 damage",
+      do.players[do.index_of(102)].damage_round == 40.0
+      and (do.players[do.index_of(101)].kills_round, do.players[do.index_of(101)].damage_round) == (0, 0.0))
+
 
 # ── reconciliation and C1 at the state level ──────────────────────────────────
 section("reconciliation, null member")

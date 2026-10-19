@@ -13,7 +13,9 @@ and scraping below 20 GB).
 
 Exit codes: 0 ok; 1 the command ran and failed; 2 usage error or missing prerequisite
 (missing file, bad argument, no model, unfinished module, refused demo, no disk
-space). Errors print one redacted line, no traceback (`--debug` adds it to the console).
+space). Nothing else (LOW-04): Ctrl-C exits 1 ("interrupted"), and a delegate or bench
+script returning any other code exits 1. Errors print one redacted line, no traceback
+(`--debug` adds the redacted traceback to the console).
 
 Commands whose implementation lives in another module (`train-wp`, `calibrate`,
 `eval`, `sanity`, `review`, `build-dataset`) import it lazily and hand it every
@@ -196,6 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-level", type=int, default=None, help="FACEIT API: minimum skill level")
     p.add_argument("--min-elo", type=int, default=None, help="FACEIT: minimum elo of discovered players")
     p.add_argument("--region", default=None, help="FACEIT region (default EU)")
+    p.add_argument("--repo", default=None, help="Hugging Face: archive repo 'owner/name' (required with --source hf)")
 
     p = add("ingest", "register one local demo (the seam: copy + matches row)")
     p.add_argument("demo", type=Path, help="the .dem file")
@@ -444,9 +447,10 @@ def _cmd_build(write: str):
         for key in keys:
             try:
                 _build_one(key, a, cfg, lg, timings, write)
-            except CLIError:
+            except CLIError as exc:
                 if not a.all:
                     raise
+                lg.error(f"{key}: {exc}")              # LOW-07: say why, not just how many
                 failed += 1
             except Exception as exc:
                 if not a.all:
@@ -678,11 +682,13 @@ def _load_dotenv(path: Path) -> None:
 
 def cmd_scrape(a, cfg, lg, run_id: str, timings: dict) -> int:
     from engine import ingest
+    if a.source == "hf" and not a.repo:                  # LOW-54: the HF source has no default repo
+        raise CLIError("scrape --source hf needs --repo owner/name (see docs/DATA_SOURCES.md)", 2)
     _load_dotenv(paths.ROOT / ".env")
-    if not os.environ.get("FACEIT_API_KEY", "").strip():
+    if a.source in ("api", "playwright") and not os.environ.get("FACEIT_API_KEY", "").strip():
         raise CLIError("FACEIT_API_KEY is not set (put it in .env, see .env.example); scrape needs it", 2)
-    kw = {k: v for k, v in (("min_level", a.min_level), ("min_elo", a.min_elo), ("region", a.region))
-          if v is not None}
+    kw = {k: v for k, v in (("min_level", a.min_level), ("min_elo", a.min_elo), ("region", a.region),
+                            ("repo", a.repo)) if v is not None}
     t0 = time.perf_counter()
     try:
         failed = ingest.run(a.source, a.max, tier=a.tier, **kw)
@@ -718,6 +724,15 @@ PASSTHROUGH = set(DELEGATES) | {"eval", "sanity", "bench"}
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
+
+def _exit_code(rc, lg) -> int:
+    """LOW-04: the CLI exits 0, 1 or 2 only; any other command / delegate / bench code is 1."""
+    rc = 0 if rc is None else rc
+    if isinstance(rc, int) and not isinstance(rc, bool) and rc in (0, 1, 2):
+        return rc
+    lg.warning(f"exit code {rc!r} from the command reported as 1 (failed)")
+    return 1
+
 
 def _space_check(cmd: str, a, lg) -> None:
     status = paths.check_space()
@@ -769,24 +784,29 @@ def main(argv: list[str] | None = None) -> int:
         if cmd != "analyze":
             lg.info(cmd, run_id=run_id, config_hash=config.config_hash(cfg), device="cpu")
         _space_check(cmd, a, lg)
-        rc = HANDLERS[cmd](a, cfg, lg, run_id, timings)
+        rc = _exit_code(HANDLERS[cmd](a, cfg, lg, run_id, timings), lg)
     except CLIError as exc:
         lg.error(str(exc))
         rc = exc.code
     except KeyboardInterrupt:
         lg.error("interrupted")
-        rc = 130
+        rc = 1                                     # LOW-04: 0/1/2 only, not 130
     except Exception as exc:
-        from engine.analyze import AnalyzeError
-        code = getattr(exc, "exit_code", None) if isinstance(exc, AnalyzeError) else None
+        try:                                       # LOW-08: a broken analyze import must not raise again here
+            from engine.analyze import AnalyzeError
+        except Exception:
+            AnalyzeError = None
+        refusal = AnalyzeError is not None and isinstance(exc, AnalyzeError)
+        code = getattr(exc, "exit_code", None) if refusal else None
         if code is None:
             code = 2 if isinstance(exc, FileNotFoundError) else 1
-        if isinstance(exc, AnalyzeError):
+        if refusal:
             lg.error(str(exc))                     # an expected refusal: one line
         else:
             lg.error(f"{type(exc).__name__}: {exc}", exc=exc)    # traceback goes to the log file only
-        if a.debug:
-            traceback.print_exception(exc, file=sys.stderr)
+        if a.debug:                                # LOW-03: redacted like every other line
+            from engine.log import redact_text
+            print(redact_text("".join(traceback.format_exception(exc))), file=sys.stderr, flush=True)
         rc = code
     finally:
         if timings:

@@ -9,9 +9,11 @@ processed rows, idempotency (same id, same sha under another id, existing file),
 unsafe ids, both-id-forms dedup before download, failure counting, the summary line,
 and that a signed URL never reaches stdout or the database.
 """
+import atexit
 import contextlib
 import io
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -20,6 +22,7 @@ from pathlib import Path
 from _harness import check, section, summary
 
 TMP = Path(tempfile.mkdtemp(prefix="ch_ingest_test_"))
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)       # LOW-77
 os.environ["CROSSHAIR_ENGINE_DB"] = str(TMP / "engine.db")
 
 from engine import db, ingest, paths  # noqa: E402
@@ -182,6 +185,17 @@ def test_process_one() -> None:
         except ValueError:
             check(f"process_one refuses unsafe id {bad!r}", True)
 
+    class HandOff(FakeSource):              # HLTV-style: yields a local file URI, knows the real page URL
+        def url_for(self, match_id):
+            return f"https://www.hltv.org/matches/1/{match_id}?ref={SECRET}"
+    _quiet(ingest.process_one, HandOff([]), "1-hand", "file:///C:/Users/someone/AppData/x.dem", "pro",
+           header_reader=fake_header)
+    con = sqlite3.connect(db.db_path())
+    stored = con.execute("SELECT demo_url FROM processed WHERE match_id='1-hand'").fetchone()[0]
+    con.close()
+    check("url_for hook: the source's URL is stored (redacted), not the file URI (LOW-10)",
+          stored == "https://www.hltv.org/matches/1/1-hand?<redacted>", stored)
+
 
 def test_run() -> None:
     section("run: counts failures and redacts error output")
@@ -209,6 +223,17 @@ def test_run() -> None:
           ingest.SOURCES["api"][0] == "faceit_api" and ingest.SOURCES["playwright"][0] == "scraper")
     check("named source resolves to the module", ingest._load_source("api").__name__ == "engine.sources.faceit_api")
 
+    class NoScope(FakeSource):              # a key without Downloads access: every match would 403
+        def download_demo(self, url, dest):
+            self.calls.append(url)
+            raise PermissionError("FACEIT Downloads API returned 403 — the API key lacks Downloads access.")
+    ns = NoScope([("4-a", SIGNED), ("4-b", SIGNED), ("4-c", SIGNED)])
+    try:
+        _quiet(ingest.run, ns, tier="faceit_10", header_reader=fake_header)
+        check("PermissionError stops the run after the first match (LOW-01)", False, "no exception")
+    except PermissionError:
+        check("PermissionError stops the run after the first match (LOW-01)", len(ns.calls) == 1, str(len(ns.calls)))
+
 
 def test_min_level() -> None:
     section("faceit_api.iter_unprocessed_demos(min_level=...) (P1.2.1)")
@@ -227,14 +252,21 @@ def test_min_level() -> None:
     }
     saved = (faceit_api.scraper.get_leaderboard_players, faceit_api.scraper.get_player_match_ids,
              faceit_api.scraper._api_get, faceit_api.time)
+    gets: list[str] = []
+
+    def fake_get(endpoint, params=None):
+        gets.append(endpoint)
+        return payloads[endpoint.rsplit("/", 1)[-1]]
     faceit_api.scraper.get_leaderboard_players = lambda **kw: [{"nickname": "p", "elo": 3000, "player_id": "x"}]
     faceit_api.scraper.get_player_match_ids = lambda nick, limit=20: list(payloads)
-    faceit_api.scraper._api_get = lambda endpoint, params=None: payloads[endpoint.rsplit("/", 1)[-1]]
+    faceit_api.scraper._api_get = fake_get
     faceit_api.time = SimpleNamespace(sleep=lambda s: None)
     try:
         got, _ = _quiet(lambda: list(faceit_api.iter_unprocessed_demos(min_level=10)))
         check("only all-ten-at-level matches pass; unknown/9-player rosters never qualify",
               [m for m, _ in got] == ["3-hi", "3-bo3_m1", "3-bo3_m2"], str(got))
+        check("one GET /matches/{id} per candidate, not two (LOW-09)",
+              sorted(gets) == sorted(f"/matches/{m}" for m in payloads), str(gets))
         got, _ = _quiet(lambda: list(faceit_api.iter_unprocessed_demos()))
         check("min_level=None keeps the previous behaviour (no filter)", len(got) == 6, str([m for m, _ in got]))
         check("lowest level read from the roster", faceit_api.get_match_min_level("3-lo") == 9

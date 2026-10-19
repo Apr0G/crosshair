@@ -508,7 +508,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-matches", type=int, default=None, help="stop after this many stored matches")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--cpu", action="store_true")
-    ap.add_argument("--out", default=None, help="markdown report path (default eval/sanity_cf_<model>.md)")
+    ap.add_argument("--out", default=None, help="markdown report path (default data/engine/eval/sanity_cf_<model>.md)")
     args = ap.parse_args(argv)
     if not args.model:
         print("sanity gate needs --model <wp_vN or model dir>")

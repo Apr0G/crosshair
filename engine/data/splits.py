@@ -8,13 +8,22 @@ edited, only superseded.
     path = splits.make_splits(rows, holdout_maps=("de_nuke",), note="out-of-map check")
     s    = splits.load(path); splits.file_hash(path)           # hash goes into manifests
 
+    .venv\\Scripts\\python.exe -m engine.data.splits --db [--holdout-maps de_nuke] [--note ...]
+    .venv\\Scripts\\python.exe -m engine.data.splits --catalog data\\engine\\catalog.parquet [--out DIR]
+
 Matches are assigned by the month of their `date` (`yyyy-mm`), so pro and FACEIT share
 the same month boundaries. A match with no date is listed under `undated` and is in no
 split. Holdout maps (P1.5.2) are removed from train/val/test into `holdout`.
+`main()` reads the rows from engine.db (`--db`) or from a catalog file (`--catalog`,
+parquet or a JSON list); a catalog row without `date` / `map` uses its `month` /
+`map_version` (LOW-35, 2026-10-19).
 """
+import argparse
 import hashlib
 import json
 import re
+import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -50,8 +59,7 @@ def assign(matches: Iterable[dict], n_test_months: int = 2, n_val_months: int = 
         raise ValueError("n_test_months and n_val_months must be >= 1")
     holdout = set(holdout_maps)
     rows    = list(matches)
-    keys    = [r["match_key"] for r in rows]
-    dupes   = sorted({k for k in keys if keys.count(k) > 1})
+    dupes   = sorted(k for k, n in Counter(r["match_key"] for r in rows).items() if n > 1)   # O(n), LOW-35
     if dupes:
         raise ValueError(f"duplicate match_key in input: {dupes[:5]}")
 
@@ -115,3 +123,58 @@ def load(path: Path) -> dict:
 def file_hash(path: Path) -> str:
     """sha256 of the splits file, recorded in manifests (P1.5.1)."""
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+# â”€â”€ CLI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def read_rows(catalog: Path) -> list[dict]:
+    """Rows from a catalog file (parquet or JSON list); `date` falls back to `month`,
+    `map` to the map name of `map_version`."""
+    p = Path(catalog)
+    if p.suffix == ".parquet":
+        import pyarrow.parquet as pq
+        rows = pq.read_table(p).to_pylist()
+    else:
+        rows = json.loads(p.read_text(encoding="utf-8"))
+    out = []
+    for r in rows:
+        r = dict(r)
+        if r.get("date") is None:
+            r["date"] = r.get("month")
+        if r.get("map") is None and r.get("map_version"):
+            r["map"] = str(r["map_version"]).split("@")[0]
+        out.append(r)
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Write the next frozen splits_v<N>.json (P1.5).")
+    ap.add_argument("--catalog", default=None, help="catalog.parquet or a JSON list of match rows")
+    ap.add_argument("--db", action="store_true", help="read the matches table of engine.db instead")
+    ap.add_argument("--out", default=None, help="output directory (default data/engine/datasets)")
+    ap.add_argument("--test-months", type=int, default=2)
+    ap.add_argument("--val-months", type=int, default=2)
+    ap.add_argument("--holdout-maps", nargs="*", default=())
+    ap.add_argument("--note", default=None)
+    a = ap.parse_args(argv)
+    if bool(a.catalog) == bool(a.db):
+        print("splits: give exactly one of --catalog PATH or --db", file=sys.stderr)
+        return 2
+    try:
+        if a.db:
+            from engine import db
+            rows = db.list_matches()
+        else:
+            rows = read_rows(Path(a.catalog))
+        path = make_splits(rows, a.test_months, a.val_months, a.holdout_maps,
+                           out_dir=Path(a.out) if a.out else None, note=a.note)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"splits: {exc}", file=sys.stderr)
+        return 2
+    doc = load(path)
+    print(f"{path}  months {doc['months']}  counts {doc['counts']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

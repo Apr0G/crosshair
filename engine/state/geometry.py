@@ -13,10 +13,13 @@ blocking is the `smoke_between` channel, computed in `pairwise.py`), "nav areas"
 module imports (and the synthetic tests run) even when map assets are absent.
 Every method returns None for "unknown", never 0 or "?".
 """
+import logging
 import math
 from typing import Protocol, runtime_checkable
 
 Point = tuple[float, float, float]
+
+log = logging.getLogger("engine.state.geometry")
 
 # ── protocol ──────────────────────────────────────────────────────────────────
 
@@ -84,6 +87,20 @@ class FlatGeometry:
 
 
 # ── real maps: adapter over engine.maps (P2) ──────────────────────────────────
+# awpy 3.1 answers an out-of-mesh point with find_area -> None and is_visible -> a bool
+# (checked on de_mirage, 2026-10-19); it raises nothing for it. Only a lookup error is
+# read as "unknown" (logged once per process with its type); anything else, e.g. a
+# ValueError / TypeError from an awpy signature change, propagates instead of turning
+# every LOS value into NaN (LOW-22).
+_LOOKUP_ERRORS            = (LookupError,)
+_LOGGED_LOOKUP: set[str]  = set()
+
+
+def _lookup_failed(what: str, exc: Exception) -> None:
+    if what not in _LOGGED_LOOKUP:
+        _LOGGED_LOOKUP.add(what)
+        log.warning(f"{what}: {type(exc).__name__} from awpy read as unknown (logged once per process)")
+
 
 class MapGeometry:
     """Adapter over `engine.maps.assets.MapAssets` + a callout list (P2.2-P2.4)."""
@@ -106,7 +123,8 @@ class MapGeometry:
             return None
         try:
             return bool(self.assets.visibility.is_visible(tuple(map(float, a)), tuple(map(float, b))))
-        except Exception:
+        except _LOOKUP_ERRORS as exc:
+            _lookup_failed("is_visible", exc)
             return None
 
     def find_area(self, p: Point) -> int | None:
@@ -114,7 +132,8 @@ class MapGeometry:
             return None
         try:
             area = self.assets.nav.find_area(tuple(map(float, p)))
-        except Exception:
+        except _LOOKUP_ERRORS as exc:
+            _lookup_failed("find_area", exc)
             return None
         if area is None:
             return None

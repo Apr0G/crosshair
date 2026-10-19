@@ -23,8 +23,9 @@ before that kill), he_damage → the linked action's own undo from
 `INTERVENTION_FOR_TYPE` (`undo_he` for an `he` action, `undo_damage` for `damage`).
 
 Edge rules:
-- `q_v(s_pre) < min_hazard` (P8.5.2), or NaN (head missing): every enabler present gets
-  its band's lower bound; flagged `min_hazard` / `hazard_nan`.
+- `q_v(s_pre) < min_hazard` (P8.5.2), or `q_v(s_pre) <= 0` (config allows
+  `min_hazard = 0`; raw_i would divide by zero), or NaN (head missing): every enabler
+  present gets its band's lower bound; flagged `min_hazard` / `hazard_nan`.
 - an intervention that fails its precondition: that enabler gets its band's lower bound;
   flagged `remove_failed:<kind>`.
 - `info`: no intervention exists, so its share is the other band's lower bound in
@@ -132,7 +133,7 @@ def split(enablers: list[dict], q_pre: float | None, q_removed: dict, cfg_attr) 
     if mode == "hazard":
         if q_pre is None or math.isnan(q_pre):
             unstable = "hazard_nan"
-        elif q_pre < cfg_attr.min_hazard:
+        elif q_pre <= 0 or q_pre < cfg_attr.min_hazard:     # q_pre <= 0: no division (LOW-27)
             unstable = "min_hazard"
         if unstable and enablers:
             flags.append(unstable)

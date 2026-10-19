@@ -185,7 +185,7 @@ class Predictor:
             for name in ("hazard", "plant15", "defuse15"):
                 if name in o:
                     out[name][a:a + B] = torch.sigmoid(o[name].double()).cpu().numpy()
-        mv = np.array([s.ctx.map_version for s in snapshots], dtype=str)
+        mv = calibrate.map_versions_through_vocab([s.ctx.map_version for s in snapshots], self.vocab)   # LOW-29
         ph = calibrate.phase_of([s.ctx.bomb_planted for s in snapshots],
                                 [s.ctx.time_remaining_s for s in snapshots],
                                 [s.ctx.time_into_round_s for s in snapshots])

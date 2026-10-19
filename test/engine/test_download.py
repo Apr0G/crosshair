@@ -2,7 +2,7 @@
 Tests for scraper.download_demo against a local HTTP server.
 
 Run from repo root:
-    .venv/bin/python test/test_download.py
+    .venv\\Scripts\\python.exe test\\engine\\test_download.py
 
 No credentials, no network, no real demo. Serves crafted responses from localhost
 so the validation added during the security pass is actually exercised:
@@ -20,13 +20,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 from _harness import check, summary
 
 SECRET = "SUPERSECRETSIGNATURE123"
 DEMO_MAGIC = b"PBDEMS2\x00"          # CS2 demo header
 BODY_RAW = DEMO_MAGIC + b"\x00" * 4000
+NO_LENGTH = -1                       # declared_len: send no Content-Length header at all
 
 
 # ── a tiny server that can misbehave on demand ────────────────────────────────
@@ -42,7 +41,8 @@ class Handler(BaseHTTPRequestHandler):
         status, ctype, body, declared_len, truncate_to = spec
         self.send_response(status)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(declared_len if declared_len is not None else len(body)))
+        if declared_len != NO_LENGTH:
+            self.send_header("Content-Length", str(declared_len if declared_len is not None else len(body)))
         self.end_headers()
         self.wfile.write(body[:truncate_to] if truncate_to is not None else body)
 
@@ -64,6 +64,7 @@ def main() -> int:
     except Exception:
         pass
     gz_body = gzip.compress(BODY_RAW)
+    bomb_gz = gzip.compress(DEMO_MAGIC + b"\x00" * (2 * 1024 * 1024))     # ~2 KB that inflates to 2 MiB
 
     Handler.routes = {
         "/ok.dem":        (200, "application/octet-stream", BODY_RAW, None, None),
@@ -72,6 +73,8 @@ def main() -> int:
         "/page.dem":      (200, "text/html; charset=utf-8", b"<html>Access denied</html>", None, None),
         "/tiny.dem":      (200, "application/octet-stream", b"xx", None, None),
         "/boom.dem":      (500, "text/plain", b"server error", None, None),
+        "/nolen.dem":     (200, "application/octet-stream", BODY_RAW, NO_LENGTH, None),
+        "/bomb.dem.gz":   (200, "application/octet-stream", bomb_gz, None, None),
     }
     if zst_body is not None:
         Handler.routes["/ok.dem.zst"] = (200, "application/octet-stream", zst_body, None, None)
@@ -130,18 +133,20 @@ def main() -> int:
                 check("a '.zst' in the query does not misroute a gzip body", False, repr(e))
 
         print("\n── rejections ──────────────────────────────────────────────────────────")
-        for route, name, desc in [
-            ("/truncated.dem", "e.dem", "a truncated transfer is rejected, not silently kept"),
-            ("/page.dem",      "f.dem", "an HTML error page is rejected"),
-            ("/tiny.dem",      "g.dem", "an implausibly small body is rejected"),
-            ("/boom.dem",      "h.dem", "a 5xx is rejected"),
-            ("/missing.dem",   "i.dem", "a 404 is rejected"),
+        for route, name, desc, why in [
+            ("/truncated.dem", "e.dem", "a truncated transfer is rejected, not silently kept",
+             ("truncated download", "transfer failed")),      # ours, or urllib3's length check
+            ("/page.dem",      "f.dem", "an HTML error page is rejected", "got HTML"),
+            ("/tiny.dem",      "g.dem", "an implausibly small body is rejected", "implausibly small"),
+            ("/boom.dem",      "h.dem", "a 5xx is rejected", "HTTP 500"),
+            ("/missing.dem",   "i.dem", "a 404 is rejected", "HTTP 404"),
         ]:
             try:
                 dl(route, name)
                 check(desc, False, "no exception raised")
-            except Exception:
-                check(desc, True)
+            except IOError as e:                         # LOW-73: the right error, not any Exception
+                whys = why if isinstance(why, tuple) else (why,)
+                check(desc, any(w in str(e) for w in whys), f"{type(e).__name__}: expected {why!r}")
 
         print("\n── no partial file survives a failure ──────────────────────────────────")
         leftovers = sorted(p.name for p in tmp.glob("*.part"))
@@ -179,15 +184,25 @@ def main() -> int:
 
         print("\n── size cap is enforced on written bytes ───────────────────────────────")
         original = scraper.MAX_DEMO_BYTES
+        cases = [  # (route, cap, desc, expected message); LOW-73: each path of the cap separately
+            ("/ok.dem",      100, "declared Content-Length over the cap aborted before the body", "declares"),
+            ("/nolen.dem",   100, "no Content-Length: the streamed bytes hit the cap", "download exceeded the size cap"),
+            ("/bomb.dem.gz", 200_000, "a small .gz that inflates past the cap is aborted (decompression bomb)",
+             "decompressed demo exceeded the size cap"),
+        ]
         try:
-            scraper.MAX_DEMO_BYTES = 100          # smaller than the 4000-byte body
-            try:
-                dl("/ok.dem", "m.dem")
-                check("oversize download is aborted", False, "no exception")
-            except Exception:
-                check("oversize download is aborted", True)
+            for i, (route, cap, desc, why) in enumerate(cases):
+                scraper.MAX_DEMO_BYTES = cap
+                try:
+                    dl(route, f"m{i}.dem")
+                    check(desc, False, "no exception")
+                except IOError as e:
+                    check(desc, why in str(e) and not (tmp / f"m{i}.dem").exists(),
+                          f"{type(e).__name__}: expected {why!r}")
         finally:
             scraper.MAX_DEMO_BYTES = original
+        check("bomb fixture is small on the wire and over the cap inflated",
+              len(bomb_gz) < 200_000 < 2 * 1024 * 1024, f"{len(bomb_gz)} bytes")
 
     finally:
         srv.shutdown()

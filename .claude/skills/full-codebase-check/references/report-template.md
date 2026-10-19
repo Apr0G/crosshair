@@ -60,11 +60,11 @@ contaminated," write that.
 ```markdown
 | ID | Sev | Title | File | Rule |
 |---|---|---|---|---|
-| CRIT-01 | CRITICAL | … | `src/scraper.py:284` | P10 |
-| HIGH-01 | HIGH | … | `src/db.py:162` | P1 |
+| CRIT-01 | CRITICAL | … | `engine/sources/scraper.py:284` | R9 |
+| HIGH-01 | HIGH | … | `engine/db.py:162` | R1 |
 ```
 
-Every finding, one row, worst first. `Rule` is the `P#` violated or `—`.
+Every finding, one row, worst first. `Rule` is the `R#` violated (SKILL.md Phase 1) or `—`.
 
 ### Findings
 
@@ -73,7 +73,7 @@ Per severity, worst first. Each finding:
 ```markdown
 #### CRIT-01 — <specific one-line title>
 
-**File:** `src/scraper.py:284` · **Category:** B. Secrets · **Confidence:** high · **Rule:** P10
+**File:** `engine/sources/scraper.py:284` · **Category:** B. Secrets · **Confidence:** high · **Rule:** R9
 
 **What's wrong**
 The precise defect: the wrong condition, the missing check, the incorrect assumption.
@@ -81,7 +81,7 @@ One paragraph, no preamble.
 
 **Evidence**
 ```python
-# src/scraper.py:282-285
+# engine/sources/scraper.py:282-285
     print(f"\r  {pct}% ({mb} MB / {total // 1_000_000} MB)", end="", flush=True)
 ```
 Quoted exactly as it appears. Line range in the comment.
@@ -106,7 +106,7 @@ LOW findings may be a single table:
 ```markdown
 | ID | Title | File | Fix |
 |---|---|---|---|
-| LOW-01 | Stale allowlist entry for deleted `src/wp_model.py` | `.claude/settings.json:14` | Remove the entry |
+| LOW-01 | Stale allowlist entry for a deleted file | `.claude/settings.json:14` | Remove the entry |
 ```
 
 ### Rule compliance
@@ -118,9 +118,9 @@ optional.
 ```markdown
 | Rule | Statement | Status | Evidence |
 |---|---|---|---|
-| P1 | No path may double-insert a match | ✗ VIOLATED | HIGH-01 — a write path commits outside `store_match` |
-| P5 | Impact sign: CT `p_after - p_before`, T negated | ✓ HOLDS | `src/score_impact.py:58` |
-| P13 | `/security-review` before every commit | ⚠ UNENFORCED | Documented in `CLAUDE.md`; no hook or CI check |
+| R1 | No path may double-insert a match | ✗ VIOLATED | HIGH-01 — a write path commits outside `register_match` |
+| R3 | CT-positive sign, flipped once per T actor | ✓ HOLDS | `engine/attribution/engine.py:58` |
+| R22 | Exit codes 0 / 1 / 2 everywhere | ⚠ UNENFORCED | Documented in `CLAUDE.md`; one path returns 130 |
 ```
 
 Status is `✓ HOLDS`, `✗ VIOLATED`, `⚠ UNENFORCED`, or `? UNVERIFIABLE`.
@@ -138,8 +138,8 @@ a blind spot.
 ```markdown
 | File | Lines | Status | Reason |
 |---|---|---|---|
-| `data/crosshair.db` | — | not read | Blocked path — schema inspected via PRAGMA only |
-| `src/feature_extractor.py` | 1351 | read in full | — |
+| `data/**` | — | not read | Blocked path — schema audited from `engine/db.py` |
+| `engine/parse/awpy3_parser.py` | 1000 | read in full | — |
 ```
 
 Blocked paths from Non-negotiable 2 are listed here as deliberately excluded, not as gaps.

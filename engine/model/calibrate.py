@@ -56,6 +56,16 @@ def map_versions_from_arrays(arrays: dict, vocab) -> np.ndarray:
     return inv[arrays["ctx_cat"][:, FEATURE_LAYOUT["ctx_cat"].index("map_version")]]
 
 
+def map_versions_through_vocab(map_versions, vocab) -> np.ndarray:
+    """Raw map versions (Snapshot.ctx.map_version) spelled as the fit sees them: through
+    the vocab, so an unseen version is '<unk>' and None is '<null>', exactly as
+    map_versions_from_arrays returns them from the shards. The Predictor keys group
+    temperatures with this (LOW-29, 2026-10-19)."""
+    inv = np.array(vocab.inverse("map_version"))
+    idx = [vocab.index("map_version", None if v is None else str(v)) for v in map_versions]
+    return inv[np.asarray(idx, dtype=np.int64)] if idx else np.zeros(0, dtype=str)
+
+
 # ── metrics ───────────────────────────────────────────────────────────────────
 
 def sigmoid(x) -> np.ndarray:

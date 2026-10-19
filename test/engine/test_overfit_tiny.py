@@ -12,15 +12,15 @@ import sys
 import time
 
 import numpy as np
-import torch
 
-from _harness import check, section, summary
-from _fake_states import fake_arrays, finish, test_device
+from _harness import check, require, section, summary
+torch = require("torch", "needs the platform torch build (docs/ENGINE_ENV.md)")   # LOW-61
+from _fake_states import fake_arrays, finish, test_device  # noqa: E402
 
-from engine import config
-from engine.data import dataset
-from engine.model import batching, train
-from engine.model.wp_model import WPModel
+from engine import config  # noqa: E402
+from engine.data import dataset  # noqa: E402
+from engine.model import batching, train  # noqa: E402
+from engine.model.wp_model import WPModel  # noqa: E402
 
 DEV = test_device()
 if DEV != "cuda" and "--allow-cpu" not in sys.argv:
@@ -67,7 +67,10 @@ secs = time.perf_counter() - t0
 losses = np.array(losses)
 final = float(losses[-10:].mean())
 print(f"first loss {losses[0]:.4f}, final (mean of last 10) {final:.4f} after {len(losses)} steps, {secs:.1f} s")
-check("ran <= 300 steps", len(losses) <= 300)
+# LOW-70: was `len(losses) <= 300`, true by construction of the loop
+check("one scheduler step per loss; the sampler offers exactly the 300 configured batches",
+      sch.last_epoch == len(losses) and sum(1 for _ in smp.epoch(0, n_batches=300)) == 300,
+      f"sched {sch.last_epoch}, losses {len(losses)}")
 check("all losses finite", bool(np.isfinite(losses).all()))
 check("train loss < 0.05 within 300 steps (mean of the last 10 steps)", final < 0.05, f"{final:.4f} at step {len(losses)}")
 

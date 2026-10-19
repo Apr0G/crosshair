@@ -6,16 +6,16 @@ the raw hazard stays finite for the loss; `aux=False` builds only the win head.
 """
 
 import numpy as np
-import torch
 
-from _harness import check, section, summary
-from _fake_states import fake_arrays, finish, test_device
+from _harness import check, require, section, summary
+torch = require("torch", "needs the platform torch build (docs/ENGINE_ENV.md)")   # LOW-61
+from _fake_states import fake_arrays, finish, test_device  # noqa: E402
 
-from engine import config
-from engine.data.dataset import PLAYER_LAYOUT, SNAPSHOT_KEYS
-from engine.model import batching
-from engine.model.heads import Heads
-from engine.model.wp_model import WPModel
+from engine import config  # noqa: E402
+from engine.data.dataset import PLAYER_LAYOUT, SNAPSHOT_KEYS  # noqa: E402
+from engine.model import batching  # noqa: E402
+from engine.model.heads import Heads  # noqa: E402
+from engine.model.wp_model import WPModel  # noqa: E402
 
 DEV = test_device()
 print(f"device: {DEV}")
@@ -53,7 +53,8 @@ dead = (a["player_num"][..., PLAYER_LAYOUT.col("alive")] < 0.5) | ~a["player_mas
 p = torch.sigmoid(out["hazard"]).cpu().numpy()
 check("fixture has dead players", bool(dead.any()))
 check("dead and absent players: hazard p = 0", bool((p[dead] == 0).all()))
-check("alive players: 0 < hazard p < 1", bool(((p[~dead] > 0) & (p[~dead] < 1)).all()))
+check("alive players: hazard p > 0 and differs between players / states (LOW-70)",
+      bool((p[~dead] > 0).all()) and float(np.ptp(p[~dead])) > 1e-4, f"range {float(np.ptp(p[~dead])):.2e}")
 check("alive mask returned for the loss", np.array_equal(out["alive"].cpu().numpy(), ~dead))
 
 finish(summary())

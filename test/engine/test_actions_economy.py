@@ -69,8 +69,11 @@ db = {a.actor_id_hash: a for a in events(make_raw_tables("drop")) if a.type == "
 check("drop story: B without a primary is eco (1600), primary_class pistol",
       (db[PID["B"]].params["equip_value"], db[PID["B"]].params["loadout_class"], db[PID["B"]].params["primary_class"])
       == (1600, "eco", "pistol"))
-check("tie on team class goes to the higher band", max(economy.BAND_ORDER, key=lambda c: (["eco", "full"].count(c),
-      economy.BAND_ORDER.index(c))) == "full")
+dtb = {a.actor_side: a for a in events(make_raw_tables("drop")) if a.type == "team_buy" and a.round_num == 1}
+ct_classes = sorted(a.params["loadout_class"] for a in db.values() if a.actor_side == "ct")
+check("tie on team class goes to the higher band: drop story CT {eco, full} -> team_buy full (LOW-71)",
+      ct_classes == ["eco", "full"] and dtb["ct"].params["team_class"] == "full",
+      f"{ct_classes} -> {dtb['ct'].params}")
 
 # ── drops ──
 section("drop / give (drop story)")

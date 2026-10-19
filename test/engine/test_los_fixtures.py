@@ -92,7 +92,57 @@ def run_map(map_name: str) -> None:
           len(fx["far_occluded"]) == N_PAIRS and n_occ >= MIN_OK, f"{n_occ}/{len(fx['far_occluded'])}")
 
 
+def test_geometry_errors() -> None:
+    """LOW-22: MapGeometry reads only a lookup error as unknown (logged once); any other
+    exception from awpy propagates instead of silently becoming NaN LOS."""
+    import logging
+    from engine.state import geometry as geo_mod
+
+    section("MapGeometry error handling (stub assets, LOW-22)")
+
+    class _Raiser:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def is_visible(self, a, b):
+            raise self.exc
+
+        def find_area(self, p):
+            raise self.exc
+
+    class _Stub:
+        map_name, release = "de_stub", "0"
+
+        def __init__(self, exc):
+            self.visibility = self.nav = _Raiser(exc)
+
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    geo_mod.log.addHandler(handler)
+    geo_mod._LOGGED_LOOKUP.clear()
+    try:
+        g = geo_mod.MapGeometry.from_assets(_Stub(KeyError("area")), [])
+        p, q = (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)
+        out = [g.is_visible(p, q), g.is_visible(p, q), g.find_area(p), g.find_area(p)]
+        check("a lookup error is unknown (None) for is_visible and find_area", out == [None] * 4, f"{out}")
+        msgs = [r.getMessage() for r in records]
+        check("logged once per method, with the exception type",
+              len(msgs) == 2 and all("KeyError" in m for m in msgs), f"{msgs}")
+        for exc in (TypeError("signature changed"), ValueError("expected a sequence of length 3")):
+            g = geo_mod.MapGeometry.from_assets(_Stub(exc), [])
+            for name, call in (("is_visible", lambda: g.is_visible(p, q)), ("find_area", lambda: g.find_area(p))):
+                try:
+                    call()
+                    check(f"{name}: {type(exc).__name__} propagates", False, "swallowed")
+                except type(exc):
+                    check(f"{name}: {type(exc).__name__} propagates", True)
+    finally:
+        geo_mod.log.removeHandler(handler)
+
+
 def main() -> int:
+    test_geometry_errors()
     if not assets.release_dir().is_dir():
         print(f"awpy-data release {assets.pinned_release()} not cached under {assets.cache_root()}")
         return 2
@@ -103,6 +153,13 @@ def main() -> int:
             print(f"wrote {fixture_path(m)}")
     for m in assets.ACTIVE_POOL:
         run_map(m)
+    section("MapGeometry on real assets: an out-of-mesh point raises nothing (LOW-22)")
+    from engine.state.geometry import MapGeometry
+    g = MapGeometry.from_assets(assets.ensure("de_mirage"), [])
+    far = (1e6, 1e6, 1e6)
+    check("out-of-mesh find_area -> None", g.find_area(far) is None)
+    check("out-of-mesh is_visible -> a bool, not an exception",
+          isinstance(g.is_visible((0.0, 0.0, 0.0), far), bool))
     return summary()
 
 

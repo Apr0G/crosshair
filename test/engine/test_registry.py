@@ -1,13 +1,14 @@
 """
-P12.1 model registry: the adoption table in docs/ENGINE_MODELS.md parses (and has no
-rows yet), `adopt` appends a row and enforces P6.7.2 for wp models, an unadopted
-model is refused, retiring in place works, `list_models` reads manifests and eval
-numbers, and the loose reader in `engine.analyze` agrees on every case.
+P12.1 model registry: the adoption table in docs/ENGINE_MODELS.md parses (model
+versions appear only in its rows), `adopt` appends a row atomically and enforces
+P6.7.2 for wp models, an unadopted model is refused, retiring in place works,
+`list_models` reads manifests and eval numbers, and the loose reader in
+`engine.analyze` agrees on every case.
 
     .venv\\Scripts\\python.exe test\\engine\\test_registry.py
 """
 import json
-import re
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -52,9 +53,15 @@ GOOD = {"logloss": 0.460, "brier": 0.150, "ece": 0.012, "baseline_logloss": 0.49
 section("docs/ENGINE_MODELS.md")
 text = DOC.read_text(encoding="utf-8") if DOC.is_file() else ""
 check("doc exists with the adoption table header", rg._table_bounds(text.splitlines()) is not None)
-check("no adoption rows yet", rg.adoption_rows(DOC) == [])
-check("no model-version token in the doc's prose (rows only; none exist yet)",
-      re.findall(r"\b[a-z]+_v\d+\b", text) == [], f"{re.findall(r'[a-z]+_v[0-9]+', text)}")
+# LOW-56: rows may exist (a legitimate adoption must not fail this test); prose outside the
+# table names no model version
+_lines = text.splitlines()
+_b = rg._table_bounds(_lines)
+_prose = "\n".join(_lines if _b is None else _lines[:_b[0]] + _lines[_b[1]:])
+check("no model-version token in the doc's prose (outside the adoption table)",
+      rg.TOKEN_RE.findall(_prose) == [], f"{rg.TOKEN_RE.findall(_prose)}")
+check("every real row parses with a known status",
+      all(r["status"].lower() in rg.STATUSES for r in rg.adoption_rows(DOC)))
 check("P6.7.2 thresholds written down", "0.01" in text and "0.02" in text and "0.80" in text and "0.75" in text)
 
 # ── adopt / refuse ────────────────────────────────────────────────────────────
@@ -75,8 +82,13 @@ with tempfile.TemporaryDirectory() as td:
         check("unadopted model refused (NotAdopted)", False)
     except rg.NotAdopted as exc:
         check("unadopted model refused (NotAdopted)", "allow-unadopted" in str(exc))
-    rg.require_adopted("wp_v7", allow_unadopted=True, doc=doc)
-    check("--allow-unadopted lets it through", True)
+    try:
+        rg.require_adopted("wp_v7", allow_unadopted=True, doc=doc)
+        let_through = True
+    except rg.NotAdopted:
+        let_through = False
+    check("--allow-unadopted lets it through without adopting it (LOW-56)",
+          let_through and not rg.is_adopted("wp_v7", doc))
     agrees(doc, ["wp_v7"])
 
     row = rg.adopt("wp_v7", GOOD, "P6.7.2: beats LightGBM by 0.03, ECE 0.012", doc=doc, when="2026-11-01",
@@ -133,6 +145,24 @@ with tempfile.TemporaryDirectory() as td:
     check("q model adopted with its rule text (no numeric rule)", rg.is_adopted("q_v2", doc))
     check("second adopt appended after the first row",
           [r["model"] for r in rg.adoption_rows(doc)] == ["wp_v7", "q_v2"])
+    # LOW-40: the doc is replaced from a temp file; a failure before the replace leaves it intact
+    model_dir(models, "q_v3")
+    before = doc.read_bytes()
+    real_replace = os.replace
+
+    def _boom(*a, **k):
+        raise OSError("simulated crash before the replace")
+    os.replace = _boom
+    try:
+        rg.adopt("q_v3", {"logloss": None}, "panel coverage ok", doc=doc, models_dir=models)
+        crashed = False
+    except OSError:
+        crashed = True
+    finally:
+        os.replace = real_replace
+    check("adopt is atomic: failure before os.replace leaves the doc byte-identical, no temp left (LOW-40)",
+          crashed and doc.read_bytes() == before and not any(p.suffix == ".tmp" for p in doc.parent.iterdir()))
+    shutil.rmtree(models / "q_v3")                        # keep the list_models fixture at three dirs
 
     section("retire in place")
     doc.write_text(doc.read_text(encoding="utf-8").replace("| adopted |\n", "| retired |\n", 1), encoding="utf-8")

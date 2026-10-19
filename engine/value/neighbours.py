@@ -181,7 +181,7 @@ def save_index(nidx: NeighbourIndex, out_dir: Path | None = None, *, cfg=None, q
     the next `paths.MODELS_DIR / neighbours_v<N>`). The manifest records which Q model
     (and its vocab sha256) encoded the descriptor ids and which WP model produced the
     stored h_pre, so `analyze` can refuse a mismatched pair (MED-17, 2026-10-19)."""
-    from engine.value.q_model import next_version_dir
+    from engine.value._paths import next_version_dir      # torch-free (LOW-32)
     out = Path(out_dir) if out_dir is not None else next_version_dir(paths.MODELS_DIR, "neighbours_v")
     out.mkdir(parents=True, exist_ok=True)
     meta_parts, outputs = [], [TABLE_FILE, META_FILE]

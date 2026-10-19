@@ -15,7 +15,9 @@ forms before downloading, download into a temp dir through the source's
 
 A source is any module (or object) with `iter_unprocessed_demos(**kwargs)` yielding
 `(match_id, url)` and `download_demo(url, dest) -> Path`. Optional: `meta_for(match_id)
--> dict` of extra `matches` columns (event, date, teams) and `close_browser()`.
+-> dict` of extra `matches` columns (event, date, teams), `url_for(match_id) -> str | None`
+(the URL to store as `processed.demo_url` when the yielded one is a local hand-off such
+as HLTV's temp file URI; redacted like any other) and `close_browser()`.
 
 Header reader contract: `header_reader(path) -> dict` with any of the keys `map`,
 `tick_rate`, `game_version`, `map_version`, `date`, `team_ct_start`, `team_t_start`
@@ -200,7 +202,9 @@ def process_one(source, match_id: str, demo_url: str, tier: str, *,
 
         meta_for = getattr(source, "meta_for", None)
         extra    = meta_for(match_id) if callable(meta_for) else None
-        key = register_demo(match_id, demo_path, redact_url(demo_url), tier=tier,
+        url_for  = getattr(source, "url_for", None)
+        stored   = (url_for(match_id) if callable(url_for) else None) or demo_url     # LOW-10
+        key = register_demo(match_id, demo_path, redact_url(stored), tier=tier,
                             source=source_name or _source_name(source),
                             header_reader=header_reader, extra_meta=extra)
         print(f"[{match_id}] registered as {key}.")
@@ -242,6 +246,8 @@ def run(source_name, max_matches: int | None = None, *, tier: str | None = None,
                 process_one(src, match_id, demo_url, tier, header_reader=header_reader,
                             source_name=name)
                 n_ok += 1          # an already-processed match was skipped cleanly: ok
+            except PermissionError:
+                raise              # LOW-01: a key without Downloads access fails every match; stop the run
             except Exception as e:
                 # `e` can embed the signed URL (requests puts it in every HTTPError).
                 msg = redact_text(f"{type(e).__name__}: {e}", demo_url)

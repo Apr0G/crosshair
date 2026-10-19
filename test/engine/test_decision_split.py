@@ -16,14 +16,16 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from _harness import check, section, summary
-from _value_states import device, side_table, split_by_match, synthetic_corpus
-from engine import config, db
-from engine.attribution.types import ScoredAction
-from engine.value import neighbours as nb
-from engine.value import q_model as qm
-from engine.value import scores as sc
-from engine.value.descriptors import STATE_FIELDS, FIELDS, DescriptorVocab, ids_from_frame
+from _harness import check, require, section, summary
+require("torch", "the Q model needs the platform torch build (docs/ENGINE_ENV.md)")      # LOW-61
+require("faiss", "the neighbour index needs faiss-cpu (requirements-engine.txt)")
+from _value_states import device, side_table, split_by_match, synthetic_corpus  # noqa: E402
+from engine import config, db  # noqa: E402
+from engine.attribution.types import ScoredAction  # noqa: E402
+from engine.value import neighbours as nb  # noqa: E402
+from engine.value import q_model as qm  # noqa: E402
+from engine.value import scores as sc  # noqa: E402
+from engine.value.descriptors import STATE_FIELDS, FIELDS, DescriptorVocab, ids_from_frame  # noqa: E402
 
 DEV = device()
 cfg = config.load()
@@ -41,7 +43,8 @@ check("D = −δ_D -> neutral", sc.verdict(-dD, dD) == "neutral")
 check("D just above +δ_D -> good", sc.verdict(dD + 1e-12, dD) == "good")
 check("D just below −δ_D -> bad", sc.verdict(-dD - 1e-12, dD) == "bad")
 check("unknown -> None", sc.verdict(None, dD) is None and sc.verdict(float("nan"), dD) is None)
-sa = ScoredAction(action_id="a" * 16, match_key="m1", round_num=1, actor_id_hash=1, actor_side="ct", type="kill", V=0.02)
+sa = ScoredAction(action_id="a" * 16, match_key="m1", round_num=1, actor_id_hash=1, actor_side="ct", type="kill",
+                  V=dX)                                 # X = V - Q = Î´_X whatever the config says (LOW-60)
 s_edge = sc.compute(sa, Q=0.0, B=0.0, panel=None, cfg=cfg)
 check("compute: X = V − Q = δ_X exactly -> neutral execution", s_edge.X == dX and s_edge.verdict_execution == "neutral")
 s_d = sc.compute(ScoredAction(**{**sa.__dict__, "V": 0.0}), Q=dD, B=0.0, panel=None, cfg=cfg)

@@ -29,11 +29,14 @@ millions of decisions automatically.
 Since 2026-10-19 Crosshair is being rebuilt as the `engine/` package: a neural
 win-probability model over per-player state, Shapley attribution over
 state-editing counterfactuals (so two actions on the same tick are split correctly),
-and a decision / execution split of every action against what pros usually do there.
+and a decision / execution split of every action against what very good players
+usually do there (the baseline is FACEIT level 10 since the plan's Amendment 2;
+pro demos are a transfer test).
 The plan is `docs/ENGINE_PLAN.md`; progress and what still needs data is
-`docs/ENGINE_PROGRESS.md`. The legacy `src/` pipeline that the rest of this README
-describes was removed (Amendment 1 of the plan); its numbers below are from the
-reference run and stay as they are.
+`docs/ENGINE_PROGRESS.md`. The legacy `src/` pipeline that "What you get", "Quick
+look", "Architecture" and "Methodology notes" below describe was removed (Amendment 1
+of the plan); its numbers are from the reference run and stay as they are. Setup,
+getting started, the CLI and the layout further down are for the engine.
 
 ```
 .venv\Scripts\python.exe -m engine.cli --help            # commands (docs/ENGINE_CLI.md)
@@ -109,18 +112,29 @@ Faceit API  ->  Playwright session  ->  .dem download     (--source playwright)
 
 ## Setup
 
-```bash
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt -c requirements.lock
+One venv, `.venv`, Python 3.12 (details: `docs/ENGINE_ENV.md`):
 
-echo "FACEIT_API_KEY=your_key_here" > .env   # from developers.faceit.com
+```
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-engine.txt
+copy .env.example .env        # then set FACEIT_API_KEY (developers.faceit.com)
 ```
 
-Examples below use `.venv/bin/python` explicitly — bare `python` is not guaranteed
-to be this interpreter, and mixing interpreters produces confusing numpy import errors.
-On Windows the interpreter is `.venv\Scripts\python.exe`.
+torch is not in `requirements-engine.txt`: install the build for your platform first
+(on the Windows PC, AMD's ROCm wheels; see `docs/ENGINE_ENV.md`).
+`requirements-engine.lock` is the exact resolution **frozen on Windows + AMD ROCm**
+(its torch / ROCm lines are cp312 Windows wheel URLs); on any other platform install
+torch first, then `pip install -r requirements-engine.txt`, not the lock.
 
-**If you use the Playwright scraper** (`--source playwright`, the default), note:
+Examples below use `.venv\Scripts\python.exe` explicitly (`.venv/bin/python` on macOS
+or Linux): bare `python` is not guaranteed to be this interpreter, and mixing
+interpreters produces confusing numpy import errors.
+
+`scrape --source api` (the default) only needs `FACEIT_API_KEY` with Downloads access
+granted; `engine.cli scrape` loads `.env` itself.
+
+**If you use the Playwright scraper** (`--source playwright`, macOS only as written,
+`engine/sources/scraper.py`), note:
 
 - It drives **your real Chrome profile**
   (`~/Library/Application Support/Google/Chrome/Default`), not a throwaway one — so
@@ -131,56 +145,56 @@ On Windows the interpreter is `.venv\Scripts\python.exe`.
   needed for this code path.
 - You need a Faceit account logged into that profile.
 
-`--source api` avoids the browser entirely and only needs `FACEIT_API_KEY` with
-Downloads access granted.
+## Getting started — from empty repo to a report
 
-## Getting started — from empty repo to scored events
+Every stage is its own command; the full retraining procedure is `docs/ENGINE_OPS.md`.
 
-```bash
-# 1. Scrape a small batch first to verify everything works.
-#    Opens Chrome — log in, press Enter, then leave it running.
-.venv/bin/python src/main.py scrape --max-players 2 --matches-per-player 5
+```
+# 1. Get demos: a small FACEIT batch, or register a demo you already have.
+.venv\Scripts\python.exe -m engine.cli scrape --source api --min-level 10 --max 5
+.venv\Scripts\python.exe -m engine.cli ingest path\to\match.dem --tier faceit_10
 
 # 2. Check what landed.
-.venv/bin/python src/main.py status
+.venv\Scripts\python.exe -m engine.cli status
 
-# 3. Train the WP model on the round_states you scraped.
-.venv/bin/python src/main.py train --eval
+# 3. Parse, then build states and actions.
+.venv\Scripts\python.exe -m engine.cli parse data\engine\demos\faceit
+.venv\Scripts\python.exe -m engine.cli build-states --all
+.venv\Scripts\python.exe -m engine.cli build-actions --all
 
-# 4. Score every event with WP-before / WP-after / impact.
-.venv/bin/python src/main.py score
+# 4. Dataset, win model, calibration, sanity gate (needs a split file, see ENGINE_OPS).
+.venv\Scripts\python.exe -m engine.cli build-dataset --split data\engine\datasets\splits_v1.json
+.venv\Scripts\python.exe -m engine.cli train-wp -- --vocab data\engine\datasets\vocab_v1.json --norm data\engine\datasets\norm_v1.json
+.venv\Scripts\python.exe -m engine.cli calibrate -- --model-dir data\engine\models\wp_v1
+.venv\Scripts\python.exe -m engine.cli sanity --model wp_v1 --counterfactual
 
-# 5. Explore.
-.venv/bin/python src/main.py top -n 10
-.venv/bin/python src/main.py round <match_id> 5 --engagements-only
-```
-
-Larger runs are the same command with bigger numbers — `--max-players 20
---matches-per-player 30` will yield a couple-hundred matches over a few
-hours of scraping.
-
-You can also drop a `.dem` file in manually instead of scraping:
-
-```bash
-.venv/bin/python src/main.py demo path/to/match.dem
+# 5. Analyse a demo with an adopted model (docs/ENGINE_MODELS.md).
+.venv\Scripts\python.exe -m engine.cli analyze path\to\match.dem --model wp_v1
 ```
 
 ## Full CLI
 
-```bash
-.venv/bin/python src/main.py status                         # DB stats
-.venv/bin/python src/main.py scrape --max-players 10        # scrape Faceit
-.venv/bin/python src/main.py scrape --source api            # ... via the Downloads API instead
-.venv/bin/python src/main.py scrape --min-elo 2500 --region EU --start-offset 0
-.venv/bin/python src/main.py demo path/to/match.dem         # process one local .dem
-.venv/bin/python src/main.py train --eval                   # train WP model
-.venv/bin/python src/main.py score                          # fill impact for all events
+`docs/ENGINE_CLI.md` documents every command, its outputs and exit codes (0 ok, 1 ran
+and failed, 2 usage error or missing prerequisite).
 
-.venv/bin/python src/main.py top -n 10                      # biggest WP swings
-.venv/bin/python src/main.py top --by negative -n 5         # worst player moments
-.venv/bin/python src/main.py top --event-type bomb          # filter by event type
-.venv/bin/python src/main.py round <match_id> <round>       # round play-by-play
-.venv/bin/python src/main.py player <name>                  # aggregate by player
+```
+.venv\Scripts\python.exe -m engine.cli status                    # DB counts, free space
+.venv\Scripts\python.exe -m engine.cli ingest <demo.dem> --tier pro
+.venv\Scripts\python.exe -m engine.cli scrape --source api --min-level 10
+.venv\Scripts\python.exe -m engine.cli scrape --source hf --repo owner/name
+.venv\Scripts\python.exe -m engine.cli parse <demo.dem | dir>
+.venv\Scripts\python.exe -m engine.cli build-states --all        # then build-actions --all
+.venv\Scripts\python.exe -m engine.cli build-dataset --split data\engine\datasets\splits_v<N>.json
+.venv\Scripts\python.exe -m engine.cli train-wp -- --vocab ... --norm ...
+.venv\Scripts\python.exe -m engine.cli calibrate -- --model-dir data\engine\models\wp_v<N>
+.venv\Scripts\python.exe -m engine.cli sanity --model wp_v<N> --counterfactual
+.venv\Scripts\python.exe -m engine.cli train-q --valued <actions_valued.parquet> --split-file <splits_vN.json>
+.venv\Scripts\python.exe -m engine.cli build-neighbours --valued <...> --q-model q_v<N> --split-file <...>
+.venv\Scripts\python.exe -m engine.cli analyze <demo.dem> --model wp_v<N> [--q-model q_v<N> --neighbours neighbours_v<N>]
+.venv\Scripts\python.exe -m engine.cli eval --model wp_v<N> --calibration
+.venv\Scripts\python.exe -m engine.cli bench analyze
+.venv\Scripts\python.exe -m engine.cli inventory [--assert-targets | --models]
+.venv\Scripts\python.exe -m engine.evaluation.anchors | review | robustness | usage | registry
 ```
 
 ## Methodology notes
@@ -217,40 +231,39 @@ bomb), and information asymmetry (enemies spotted, sounds heard within range).
 ## Project layout
 
 ```
-src/
-  main.py                  single CLI entry point
-  scraper.py               Faceit API + Playwright demo discovery (--source playwright)
-  faceit_api.py            Faceit Data + Downloads API demo source (--source api)
-  pipeline.py              orchestrates scrape -> extract -> store; both sources meet here
-  extract.py               awpy wrapper, .dem -> pandas tables
-  feature_extractor.py     pulls decision events (buy / engagement / util / rotation / bomb)
-  state_sampler.py         samples team state every ~1 s
-  win_probability.py       LightGBM WP model (train / load / predict)
-  attribution.py           event-boundary attribution engine (pure; conservation-checked)
-  score_impact.py          fills p_before / p_after / impact (grid or event attribution)
-  db.py                    SQLite schema, migrations, one-transaction store_match
+engine/
+  cli.py analyze.py        CLI (`python -m engine.cli`) and the demo -> report pipeline
+  config.py config.yaml    every tunable, validated; config_hash in manifests
+  paths.py manifest.py log.py   data/engine layout; run manifests; JSON-lines logging with redaction
+  db.py ingest.py          engine.db (matches, runs, action_scores, processed); the seam
+  sources/                 scraper.py (Playwright), faceit_api.py, hltv.py, hf_archive.py
+  parse/                   schema.py (RawTables contract), awpy3_parser.py, worker.py
+  maps/                    assets, grid, version (+ versions.yaml), callouts, plot
+  state/                   snapshot schema (tokens, LIVE_SAFE), sampler, players, utility,
+                           context, pairwise, geometry, builder, leakage
+  actions/                 action types and extractors, windows
+  data/                    quarantine, inventory, splits, layout, dataset, qa
+  model/                   set encoder, temporal, heads, wp_model, train, predict, calibrate,
+                           baseline_lgbm (yardstick)
+  counterfactual/          interventions, apply, sanity (P7 gate), ood
+  attribution/             partition, shapley, movement, clock, enablers, engine
+  value/                   descriptors, q_model, neighbours, scores (V = B + D + X), shrinkage
+  report/                  writer, cards, charts, schema.json
+  evaluation/              anchors, review, robustness, usage, registry
 
-test/                      plain scripts, not pytest — `run_all.py` runs them all
-  run_all.py               runs every test, tallies pass / fail / skipped
-  test_invariants.py       schema + feature-parity + redaction checks (stdlib only)
-  test_db.py               fresh schema, migrations, store_match atomicity (stdlib only)
-  test_attribution.py      attribution engine on synthetic WP paths
-  test_feature_extractor.py / test_state_sampler.py / test_pipeline.py / test_score_impact.py
-                           extractor, sampler, seam and scorer on a synthetic demo (no awpy)
-  test_download.py         download validation against a local HTTP server
-  test_attribution_windows.py / test_build_state.py   contract checks on a real .dem
-  test_win_probability.py  WP output properties incl. a calibration check; needs a model
-  test_attribution_integration.py / test_attribution_compare.py   need DB + model
-  test_local_demo.py       inspection script for a local .dem (writes nothing)
-  test_scraper.py          manual check for demo URL discovery; opens real Chrome
+test/                      plain scripts, not pytest
+  run_all.py               runs every test/engine/test_*.py, tallies pass / fail / error / skipped
+  engine/                  one test_<module>.py per module; _harness.py, synthetic fixtures
+  engine/test_scraper.py   manual check for demo URL discovery; opens real Chrome (not in run_all)
 
-docs/reviews/              dated codebase audits
+bench/                     timing scripts (`engine.cli bench <which>`), budget.yaml
+docs/                      plan, progress, CLI, ops, models, data sources; reviews/ holds dated audits
 
-data/                      (gitignored — generated by the pipeline)
-  crosshair.db             SQLite store
-  win_prob.lgb             trained model
+data/engine/               (gitignored, generated) engine.db, demos/{pro,faceit,golden,quarantine},
+                           parsed/, states/, actions/, windows/, datasets/, models/, eval/,
+                           reports/, bench/, logs/
 ```
 
 ## License
 
-MIT.
+Licence: not yet chosen (there is no LICENSE file).

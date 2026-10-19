@@ -5,6 +5,7 @@ round clipping, non-overlap and full coverage of every round on every story.
 
     .venv\\Scripts\\python.exe test\\engine\\test_windows.py
 """
+import dataclasses
 import sys
 
 from _harness import check, section, summary
@@ -72,6 +73,29 @@ try:
     check("tick_rate 0 rejected", False)
 except ValueError:
     check("tick_rate 0 rejected", True)
+
+section("bounds follow sampling.boundary_offset_ticks (LOW-24)")
+CFG2 = dataclasses.replace(CFG, sampling=dataclasses.replace(CFG.sampling, boundary_offset_ticks=2))
+ws = windows.group([k1, k2], CFG2, 128)
+check("offset 2: bounds [min - 2, max + 2]", len(ws) == 1 and (ws[0].start_tick, ws[0].end_tick) == (1998, 2002),
+      str([(w.start_tick, w.end_tick) for w in ws]))
+ws = windows.group([k1, k3], CFG2, 128)
+check("offset 2: kills 3 ticks apart would share ticks, so they form one window [1998, 2005]",
+      len(ws) == 1 and (ws[0].start_tick, ws[0].end_tick) == (1998, 2005) and not windows.overlaps(ws),
+      str([(w.start_tick, w.end_tick) for w in ws]))
+ws = windows.group([k1, inst("kill", 2005, 2)], CFG2, 128)
+check("offset 2: kills 5 ticks apart -> two windows sharing no tick",
+      len(ws) == 2 and ws[0].end_tick < ws[1].start_tick and not windows.overlaps(ws))
+ws = windows.group([give, inst("kill", 1302, 1)], CFG, 128)
+check("a kill right after a drop's span joins it instead of sharing the span's end tick",
+      len(ws) == 1 and (ws[0].start_tick, ws[0].end_tick) == (899, 1303) and not windows.overlaps(ws),
+      str([(w.start_tick, w.end_tick) for w in ws]))
+for story in ("double_kill_same_tick", STORIES[-1]):
+    snaps2, acts2, ws2 = extractor.run(make_raw_tables(story, 128), CFG2, match_key="m1", geometry=GEO)
+    snap_ticks2 = {(s.meta.round_num, s.meta.tick) for s in snaps2}
+    check(f"offset 2, {story}: every window has its pre and post sample, no overlaps",
+          bool(ws2) and not windows.overlaps(ws2)
+          and all((w.round_num, w.start_tick) in snap_ticks2 and (w.round_num, w.end_tick) in snap_ticks2 for w in ws2))
 
 section("coverage")
 row = {"round_num": 1, "freeze_end_tick": 1000, "end_tick": 4040, "official_end_tick": 4360}

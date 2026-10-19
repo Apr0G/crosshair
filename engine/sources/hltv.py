@@ -18,7 +18,9 @@ behind Cloudflare); re-check them on the first real run. Check the site terms fi
 Source interface for `engine.ingest.run`: `iter_unprocessed_demos(matches=...)` downloads
 and unpacks each match into a work dir and yields `(match_id, file URI)` per map, the
 match_id being the file stem; `download_demo(uri, dest)` moves that file to `dest`;
-`meta_for(match_id)` gives `event` and `date` for the `matches` row.
+`meta_for(match_id)` gives `event` and `date` for the `matches` row; `url_for(match_id)`
+gives the HLTV match page URL that `processed.demo_url` stores instead of the temp file
+URI (LOW-10: the URI carried the local user name and pointed nowhere after the run).
 """
 import html
 import re
@@ -253,6 +255,7 @@ def download_match(match: str, dest_dir: Path, *, base_url: str = HLTV_BASE,
 
 _PENDING: set[Path] = set()           # files this module unpacked and has not handed out
 _META:    dict[str, dict] = {}
+_URLS:    dict[str, str]  = {}        # match id -> HLTV match page URL (stored as processed.demo_url)
 FAILURES: list[tuple[str, str]] = []  # (match id, redacted error) of matches the generator could not resolve
                                       # or download; `ingest.run` adds them to its failed count (MED-26)
 
@@ -292,6 +295,7 @@ def iter_unprocessed_demos(matches=(), base_url: str = HLTV_BASE, work_dir: Path
                     continue
                 _PENDING.add(f.resolve())
                 _META[mid] = {"event": info.event, "date": info.date}
+                _URLS[mid] = info.url
                 yield mid, f.resolve().as_uri()
     finally:
         if own:
@@ -317,3 +321,8 @@ def download_demo(url: str, dest: Path) -> Path:
 
 def meta_for(match_id: str) -> dict:
     return dict(_META.get(match_id, {}))
+
+
+def url_for(match_id: str) -> str | None:
+    """The match page URL for `processed.demo_url` (ingest redacts it); None if unknown."""
+    return _URLS.get(match_id)

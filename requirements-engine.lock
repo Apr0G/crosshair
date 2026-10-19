@@ -1,3 +1,7 @@
+# Exact resolution of requirements-engine.txt, frozen on Windows + AMD ROCm (Python 3.12):
+# the torch and rocm-* lines are cp312 win_amd64 wheel URLs from repo.radeon.com, so this
+# file installs only there. Other platforms: install the matching torch build first, then
+# `pip install -r requirements-engine.txt` (not this lock). See README "Setup" (LOW-47).
 annotated-doc==0.0.5
 attrs==26.1.0
 awpy==3.1.0

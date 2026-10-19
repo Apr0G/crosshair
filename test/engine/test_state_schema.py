@@ -14,8 +14,11 @@ import sys
 import numpy as np
 import polars as pl
 
+from _fake_states import make_round
 from _harness import check, section, summary
 
+from engine.state import pairwise
+from engine.state.geometry import FlatGeometry
 from engine.state.schema import (CTX_FIELDS, LIVE_SAFE, MAX_UTILITY, N_PLAYERS, PAIR_CHANNELS,
                                  PLAYER_FIELDS, SCHEMA_VERSION, STATE_COLUMNS, UTILITY_FIELDS,
                                  ContextToken, PlayerToken, Snapshot, SnapshotMeta, UtilityToken,
@@ -69,7 +72,7 @@ def make_pair(players: list[PlayerToken]) -> np.ndarray:
             pr[i, j, 0] = (1.0 if (i + j) % 2 else 0.0) if enemies and a.alive and b.alive else np.nan
             pr[i, j, 1] = math.dist((a.x, a.y), (b.x, b.y))
             pr[i, j, 2] = np.nan if 9 in (i, j) else pr[i, j, 1] * 1.2
-            pr[i, j, 3] = 0.0
+            pr[i, j, 3] = 0.0 if a.alive and b.alive else np.nan     # as pairwise.py: alive pairs only
             pr[i, j, 4] = 0.0 if enemies else 1.0
     return pr
 
@@ -82,7 +85,8 @@ def make_snapshot() -> Snapshot:
                        bomb_carrier_alive=1, alive_ct=4, alive_t=4,
                        equip_ct=float(sum(4000 + i for i in range(4))),
                        equip_t=float(sum(4000 + i for i in range(5, 9))),
-                       money_ct=3200.0, money_t=3200.0, loss_streak_ct=0, loss_streak_t=1,
+                       money_ct=4000.0, money_t=4000.0,     # 5 accounts of 800, dead ones included
+                       loss_streak_ct=0, loss_streak_t=1,
                        score_ct=3, score_t=2, round_num=6, half=1, is_overtime=0,
                        n_active_smokes=1, n_active_fires=0)
     util = [UtilityToken(kind="smoke", x=1000.0, y=0.0, z=0.0, time_left_s=12.5, owner_side="ct",
@@ -167,6 +171,20 @@ check("6 T / 4 CT -> problem", any("on side t" in p for p in s.validate()))
 s = snap.copy()
 s.pair[0, 4, 0] = s.pair[4, 0, 0] = 1.0
 check("los with a dead player -> problem", any("pair.los" in p for p in s.validate()))
+
+# ── fixtures agree with the builder (LOW-64) ──
+section("hand-made and _fake_states fixtures follow the builder's pair / money definitions")
+SMOKE_CH = PAIR_CHANNELS.index("smoke_between")
+built = pairwise.table(snap.players, FlatGeometry(), snap.utility)
+check("hand-made pair: smoke_between NaN exactly where pairwise.table writes NaN (dead pairs)",
+      np.array_equal(np.isnan(snap.pair[:, :, SMOKE_CH]), np.isnan(built[:, :, SMOKE_CH])))
+fr = make_round(40, seed=3, ct_wins=True)
+dead_pair_ok = all(np.isnan(s.pair[i, j, SMOKE_CH]) == (s.players[i].alive != 1 or s.players[j].alive != 1)
+                   for s in fr for i in range(N_PLAYERS) for j in range(N_PLAYERS) if i != j)
+check("_fake_states: smoke_between NaN for every pair with a dead player, 0/1 otherwise", dead_pair_ok)
+deaths = fr[0].ctx.alive_ct + fr[0].ctx.alive_t > fr[-1].ctx.alive_ct + fr[-1].ctx.alive_t
+check("_fake_states: money_ct/t is every roster account, so a death does not lower it",
+      deaths and len({(s.ctx.money_ct, s.ctx.money_t) for s in fr}) == 1)
 
 # ── rows and frames ──
 section("to_row / from_row / frames")

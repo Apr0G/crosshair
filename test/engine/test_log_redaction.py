@@ -38,6 +38,17 @@ def test_redact_text() -> None:
     check(".dem.gz / .dem variants redacted",
           all(SECRET not in log.redact_text(f"/a/b{ext}?s={SECRET}") for ext in (".dem", ".dem.gz", ".DEM")))
     check("Bearer token redacted", TOKEN not in log.redact_text(f"Authorization: Bearer {TOKEN}"))
+    upper = log.redact_text(f"x HTTPS://demos.faceit-cdn.net{DEMO_PATH}?sig={SECRET} y")
+    check("upper-case scheme redacted (LOW-02/LOW-74)", SECRET not in upper and "?<redacted>" in upper, upper)
+    check("mixed-case Http:// redacted", SECRET not in log.redact_text(f"Http://h/a/b.json?token={SECRET}"))
+    for text in (f'"GET /api/v4/matches/1-abc?token={SECRET} HTTP/1.1" 403',
+                 f"Max retries exceeded with url: /download/v2/x.zip?X-Amz-Signature={SECRET} (Caused by",
+                 f"/resolve/main/2026-08/a.parquet?download=true&sig={SECRET}"):
+        out = log.redact_text(text)
+        check(f"scheme-less non-.dem path?query redacted: {text.split('?')[0][-28:]!r}",
+              SECRET not in out and "?<redacted>" in out, out)
+    check("non-.dem path keeps its path", log.redact_text(f"/a/b.zip?s={SECRET}") == "/a/b.zip?<redacted>")
+    check("question mark in prose untouched", log.redact_text("is it /tmp/x? yes") == "is it /tmp/x? yes")
     check("already-redacted text is stable",
           log.redact_text(log.redact_text(SIGNED)) == log.redact_text(SIGNED), log.redact_text(SIGNED))
     check("plain URL without query unchanged",

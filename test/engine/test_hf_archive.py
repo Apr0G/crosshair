@@ -9,11 +9,13 @@ filter + LFS sha256, map/month classification, wave selection and packing, sha25
 verification (match, mismatch -> no file), the free-space stop before a wave, and the
 source interface through ingest.run.
 """
+import atexit
 import contextlib
 import hashlib
 import io
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -24,6 +26,7 @@ from pathlib import Path
 from _harness import check, section, summary
 
 TMP = Path(tempfile.mkdtemp(prefix="ch_hf_test_"))
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)       # LOW-77
 os.environ["CROSSHAIR_ENGINE_DB"] = str(TMP / "engine.db")
 
 from engine import db, ingest, paths  # noqa: E402
@@ -31,6 +34,14 @@ from engine.sources import hf_archive as hf  # noqa: E402
 
 REPO = "someone/pro-demos"
 paths.DEMOS_PRO_DIR = TMP / "demos" / "pro"
+# LOW-77: the real 20 GB floor on TMP's volume would fail this test on a full disk; the
+# REFUSE path is exercised explicitly below
+paths.check_space = lambda *a, **k: paths.SpaceStatus.OK
+
+
+def mid(path: str) -> str:
+    """The expected id: readable path part plus 8 hex of sha1(path) (LOW-11)."""
+    return hf.match_id_for(path)
 
 
 def body(tag: str, n: int = 3000) -> bytes:
@@ -118,7 +129,12 @@ def test_pure() -> None:
     check("map + month selection", [[f.path for f in w] for w in sel] == [["p0", "p1"]])
     check("unknown map never selected by a map filter",
           all(f.map is not None for w in hf.plan_waves(files, maps={"de_mirage", "de_nuke"}) for f in w))
-    check("match ids are safe", hf.match_id_for("2026-08/de_mirage/a b.dem.zst") == "hf-2026-08-de_mirage-a-b")
+    check("match ids are safe", hf.match_id_for("2026-08/de_mirage/a b.dem.zst") == "hf-2026-08-de_mirage-a-b-f55dd1e9",
+          hf.match_id_for("2026-08/de_mirage/a b.dem.zst"))
+    clash = ["a/b.dem", "a-b.dem", "x.dem", "x.dem.zst", "x.dem.gz", "A/b.dem"]
+    ids = [hf.match_id_for(p) for p in clash]
+    check("match ids are injective on colliding paths (LOW-11)", len(set(ids)) == len(ids), str(ids))
+    check("match ids pass the ingest id check", all(ingest.check_match_id(i) for i in ids))
     check("resolve URL", hf.resolve_url("o/r", "x/y z.dem", base="http://h")
           == "http://h/datasets/o/r/resolve/main/x/y%20z.dem")
 
@@ -148,9 +164,11 @@ def test_server() -> None:
         got, log = _quiet(hf.download_waves, files, out, REPO, maps={"de_mirage"}, months={"2026-08"},
                           wave_bytes=4000, base=base)
         check("selected map-month downloaded, one file per wave",
-              sorted(p.name for p in got) == ["hf-2026-08-de_mirage-a.dem", "hf-2026-08-de_mirage-b.dem"]
+              sorted(p.name for p in got) == sorted(f"{mid(p)}.dem" for p in ("2026-08/de_mirage/a.dem",
+                                                                               "2026-08/de_mirage/b.dem"))
               and log.count("wave ") == 2, log[-200:])
-        check("bytes verified intact", (out / "hf-2026-08-de_mirage-a.dem").read_bytes() == FILES["2026-08/de_mirage/a.dem"])
+        check("bytes verified intact",
+              (out / f"{mid('2026-08/de_mirage/a.dem')}.dem").read_bytes() == FILES["2026-08/de_mirage/a.dem"])
         n_before = len(Handler.hits)
         _quiet(hf.download_waves, files, out, REPO, maps={"de_mirage"}, months={"2026-08"}, base=base)
         check("existing verified files are not downloaded again", len(Handler.hits) == n_before)
@@ -159,7 +177,7 @@ def test_server() -> None:
             check("sha256 mismatch raises", False)
         except IOError as e:
             check("sha256 mismatch raises and leaves no file",
-                  "mismatch" in str(e) and not (out / "hf-2026-09-de_nuke-bad.dem").exists(), str(e))
+                  "mismatch" in str(e) and not (out / f"{mid('2026-09/de_nuke/bad.dem')}.dem").exists(), str(e))
 
         saved = paths.check_space
         paths.check_space = lambda *a, **k: paths.SpaceStatus.REFUSE
@@ -175,7 +193,8 @@ def test_server() -> None:
                                maps=["de_mirage"], api_base=api, base=base)
         keys = sorted(r["match_key"] for r in db.list_matches())
         check("three mirage files registered", n_failed == 0 and keys ==
-              ["hf-2026-08-de_mirage-a", "hf-2026-08-de_mirage-b", "hf-2026-09-de_mirage-d"], f"{keys} {log[-150:]}")
+              sorted(mid(p) for p in ("2026-08/de_mirage/a.dem", "2026-08/de_mirage/b.dem", "2026-09/de_mirage/d.dem")),
+              f"{keys} {log[-150:]}")
         check("source recorded as hf_archive", db.get_match(keys[0])["source"] == "hf_archive")
         n_failed, log = _quiet(ingest.run, hf, tier="pro", header_reader=hdr, repo=REPO,
                                maps=["de_nuke"], months=["2026-09"], api_base=api, base=base)

@@ -12,6 +12,10 @@ import polars as pl
 from _harness import check, close, section, summary
 from _synthetic import PLAYERS, STORIES, STORY_FACTS, make_raw_tables, scale_tick
 
+from engine import config
+from engine.actions import extractor
+from engine.state.geometry import FlatGeometry
+
 ID = {p: sid for p, (sid, _) in PLAYERS.items()}
 
 for tr in (64, 128):
@@ -109,7 +113,8 @@ for tr in (64, 128):
         # ── story specifics ──
         if story == "flash":
             bl = {sid: d for sid, d in raw.flashes.select("player_steamid", "blind_duration").rows()}
-            check("flash blinds D 2.5 s and C 1.0 s", bl == {ID["D"]: 2.5, ID["C"]: 1.0})
+            check("flash blinds as STORY_FACTS['blinded'] says (D 2.5 s, C 1.0 s)",
+                  bl == {ID[p]: d for p, d in f["blinded"].items()})
             check("C blind at the kill (victim_blind)", raw.kills.filter(
                 pl.col("victim_steamid") == ID["C"])["victim_blind"].to_list() == [True])
             d = raw.ticks.filter((pl.col("steamid") == ID["D"]) & (pl.col("tick") == T(1900) + tr))
@@ -120,29 +125,44 @@ for tr in (64, 128):
             check("two kills on tick 2000", raw.kills.filter(pl.col("tick") == T(2000)).height == 2)
         if story == "trade":
             tk = raw.kills.filter(pl.col("is_trade"))
-            check("one trade kill: B kills C at 2100",
-                  tk.select("tick", "attacker_steamid", "victim_steamid").rows() == [(T(2100), ID["B"], ID["C"])])
+            check("trade kills as STORY_FACTS['trade_kills'] says (B kills C at 2100)",
+                  tk.select("tick", "attacker_steamid", "victim_steamid").rows()
+                  == [(T(t), ID[a_], ID[v]) for t, a_, v in f["trade_kills"]])
             check("bomb explodes at round end",
                   raw.bomb.filter(pl.col("event") == "explode")["tick"].to_list() == [T(3000) + 40 * tr])
         else:
             check("no trade flags", not raw.kills["is_trade"].any())
         if story == "retreat":
-            c = raw.ticks.filter(pl.col("steamid") == ID["C"])
-            y0 = float(c.filter(pl.col("tick") == T(3000))["y"][0])
-            y1 = float(c.filter(pl.col("tick") == T(3640))["y"][0])
-            check("C runs 1250 units away from the bomb (+y)", close(y1 - y0, 1250.0, 1.0))
+            rt = f["retreat"]
+            c = raw.ticks.filter(pl.col("steamid") == ID[rt["player"]])
+            y0 = float(c.filter(pl.col("tick") == T(rt["from_tick"]))["y"][0])
+            y1 = float(c.filter(pl.col("tick") == T(rt["to_tick"]))["y"][0])
+            check("C runs STORY_FACTS['retreat'] units (1250) away from the bomb (+y)",
+                  close(y1 - y0, rt["units"], 1.0))
             check("C survives round 1", bool(c.filter(pl.col("tick") == T(f["r1_end"]))["is_alive"][0]))
             bt = raw.ticks.filter((pl.col("steamid") == ID["B"]) & (pl.col("tick") == T(3950)))
             check("B defusing with kit at 3950", bool(bt["is_defusing"][0]) and bool(bt["has_defuser"][0]))
         if story == "drop":
             ev = raw.items.select("tick", "steamid", "event", "item").rows()
-            check("items: A drops m4a1 at 1100, B picks it up at 1150",
-                  ev == [(T(1100), ID["A"], "drop", "weapon_m4a1"), (T(1150), ID["B"], "pickup", "weapon_m4a1")])
+            check("items as STORY_FACTS['item_events'] says (A drops m4a1 at 1100, B picks it up at 1150)",
+                  ev == [(T(t), ID[p], e, i) for t, p, e, i in f["item_events"]])
             bi = raw.ticks.filter((pl.col("steamid") == ID["B"]))
             check("B holds the m4a1 only after the pickup",
                   "weapon_m4a1" not in bi.filter(pl.col("tick") == T(1150) - 1)["inventory"][0].to_list()
                   and "weapon_m4a1" in bi.filter(pl.col("tick") == T(1150))["inventory"][0].to_list())
         else:
             check("no item events", raw.items.height == 0)
+
+section("spotted_by=False: the parser's all-null spotted_by (LOW-63)")
+for tr in (64, 128):
+    full, nul = make_raw_tables("base", tr), make_raw_tables("base", tr, spotted_by=False)
+    check(f"@{tr}: default fills spotted_by", full.ticks["spotted_by"].null_count() == 0)
+    check(f"@{tr}: spotted_by=False -> null on every row, strict validate passes",
+          nul.ticks["spotted_by"].null_count() == nul.ticks.height and nul.validate(strict=True) == [])
+    check(f"@{tr}: every other column identical", nul.ticks.drop("spotted_by").equals(full.ticks.drop("spotted_by")))
+snaps = extractor.run(make_raw_tables("base", spotted_by=False), config.load(), match_key="m1",
+                      geometry=FlatGeometry())[0]
+check("the builder reads an all-null spotted_by as unknown (spotted_by_count None), not 0",
+      {p.spotted_by_count for s in snaps for p in s.players if p.alive == 1} == {None})
 
 sys.exit(summary())

@@ -10,10 +10,11 @@ Structured run logging with redaction (P0.2.4).
 
 Every record, file and console alike, passes through `redact_text` before it is
 written. That covers: full URLs (query string dropped via
-`engine.sources.scraper.redact_url`, the one implementation of the rule), any
-`.dem` / `.dem.zst` / `.dem.gz` path followed by `?query` (urllib3 and requests log
-`path?query` without the scheme and host, so URL matching alone misses them), and
-`Bearer <token>` headers. Secrets registered with `add_secret` are replaced first.
+`engine.sources.scraper.redact_url`, the one implementation of the rule; any scheme
+case), any `.dem` / `.dem.zst` / `.dem.gz` path followed by `?query`, any other
+`/path?query` (urllib3 and requests log `path?query` without the scheme and host, so
+URL matching alone misses them; LOW-02), and `Bearer <token>` headers. Secrets
+registered with `add_secret` are replaced first.
 """
 import json
 import re
@@ -30,8 +31,9 @@ from engine.sources.scraper import redact_url
 # ── redaction ─────────────────────────────────────────────────────────────────
 
 REDACTED        = "<redacted>"
-_URL_RE         = re.compile(r"https?://[^\s'\"<>]+")
+_URL_RE         = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 _DEMO_QUERY_RE  = re.compile(r"(\.dem(?:\.zst|\.gz)?)\?(?!<redacted>)[^\s'\"<>]*", re.IGNORECASE)
+_PATH_QUERY_RE  = re.compile(r"(/[^\s'\"<>?]*)\?(?!<redacted>)[^\s'\"<>]+")    # scheme-less /path?query
 _BEARER_RE      = re.compile(r"(Bearer\s+)[^\s'\"<>]+", re.IGNORECASE)
 
 
@@ -47,8 +49,8 @@ def redact_text(text, *urls: str) -> str:
     """Return `text` with every credential-bearing part removed.
 
     Each url in `urls` is replaced by its redacted form wherever it appears; then any
-    remaining http(s) URL loses its query string, any `.dem[.zst|.gz]?query` loses
-    the query, and `Bearer <token>` loses the token."""
+    remaining http(s) URL loses its query string, any `.dem[.zst|.gz]?query` or other
+    `/path?query` loses the query, and `Bearer <token>` loses the token."""
     if text is None:
         return ""
     s = str(text)
@@ -57,6 +59,7 @@ def redact_text(text, *urls: str) -> str:
             s = s.replace(str(u), redact_url(str(u)))
     s = _URL_RE.sub(_redact_match, s)
     s = _DEMO_QUERY_RE.sub(lambda m: f"{m.group(1)}?{REDACTED}", s)
+    s = _PATH_QUERY_RE.sub(lambda m: f"{m.group(1)}?{REDACTED}", s)
     s = _BEARER_RE.sub(lambda m: f"{m.group(1)}{REDACTED}", s)
     return s
 

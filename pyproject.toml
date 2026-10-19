@@ -5,7 +5,13 @@
 #
 # The console script points at the `engine` package (a real package, unlike the old
 # flat src/ modules), so `crosshair <command>` and `python -m engine.cli <command>` are
-# the same entry point.
+# the same entry point. The script exists only after `pip install -e .` (not done on the
+# Windows PC); until then use `python -m engine.cli`.
+#
+# package-data lists every data file the engine reads at runtime (LOW-46), so a
+# non-editable install works too. pyflakes is a dev tool but still sits in
+# requirements-engine.txt, which this file reads; moving it to a `dev` extra means
+# editing that file and re-freezing the lock (open question in the 2026-10-19 audit).
 
 [project]
 name            = "crosshair"
@@ -24,7 +30,13 @@ dependencies = { file = ["requirements-engine.txt"] }
 include = ["engine*"]
 
 [tool.setuptools.package-data]
-engine = ["config.yaml"]
+engine = [
+    "config.yaml",
+    "maps/versions.yaml",
+    "maps/*/callouts.json",
+    "report/schema.json",
+    "state/vocab_weapons.yaml",
+]
 
 [build-system]
 requires      = ["setuptools>=68"]

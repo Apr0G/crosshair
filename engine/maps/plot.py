@@ -61,4 +61,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("usage: python -m engine.maps.plot <map> [out.png]")
         sys.exit(2)
-    print(plot(sys.argv[1], Path(sys.argv[2]) if len(sys.argv) > 2 else None))
+    try:
+        print(plot(sys.argv[1], Path(sys.argv[2]) if len(sys.argv) > 2 else None))
+    except (map_assets_mod.MapAssetError, FileNotFoundError) as exc:   # missing prerequisite (LOW-19)
+        print(f"cannot plot {sys.argv[1]}: {exc}", file=sys.stderr)
+        sys.exit(2)

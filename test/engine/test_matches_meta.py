@@ -53,7 +53,7 @@ def main() -> int:
         check("unique index rejects a raw duplicate sha256", True)
     con.rollback()
     idx = con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='matches'").fetchone()[0]
-    check("demo_sha256 declared UNIQUE", "demo_sha256       TEXT UNIQUE" in idx)
+    check("demo_sha256 declared UNIQUE", "demo_sha256 TEXT UNIQUE" in " ".join(idx.split()))   # LOW-78: any spacing
     con.close()
     key = db.register_match({**meta, "match_key": "hf-same-file", "source": "hf_archive"})
     check("same file from another source keeps the earlier row", key == meta["match_key"]

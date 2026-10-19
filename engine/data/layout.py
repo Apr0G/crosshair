@@ -91,16 +91,29 @@ def _sha256(path: Path) -> str:
 
 def write_dir_manifest(directory: Path, *, schema_version: int, config_hash: str | None) -> dict:
     """(Re)write `<directory>/manifest.json` listing the parquet files present now,
-    with the builder's schema_version and config_hash. Atomic replace."""
+    with the builder's schema_version and config_hash. Atomic replace. A file whose
+    size and mtime_ns equal the previous manifest's entry keeps its recorded sha256
+    instead of being re-hashed (one write per match no longer re-hashes the whole
+    month directory, LOW-34)."""
     d = Path(directory)
     d.mkdir(parents=True, exist_ok=True)
+    try:
+        prev = {f["name"]: f for f in (read_dir_manifest(d) or {}).get("files", []) if isinstance(f, dict)}
+    except (ValueError, OSError):
+        prev = {}
+    files = []
+    for f in sorted(d.glob("*.parquet")):
+        st  = f.stat()
+        old = prev.get(f.name) or {}
+        same = old.get("bytes") == st.st_size and old.get("mtime_ns") == st.st_mtime_ns and old.get("sha256")
+        files.append({"name": f.name, "bytes": st.st_size, "mtime_ns": st.st_mtime_ns,
+                      "sha256": old["sha256"] if same else _sha256(f)})
     m = {
         "layout_version": LAYOUT_VERSION,
         "schema_version": schema_version,
         "config_hash":    config_hash,
         "updated_at":     datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "files": [{"name": f.name, "bytes": f.stat().st_size, "sha256": _sha256(f)}
-                  for f in sorted(d.glob("*.parquet"))],
+        "files":          files,
     }
     tmp = d / (DIR_MANIFEST + ".tmp")
     tmp.write_text(json.dumps(m, indent=2, sort_keys=True), encoding="utf-8")

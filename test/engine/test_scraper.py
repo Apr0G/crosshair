@@ -1,24 +1,25 @@
 """Manual smoke check for demo-URL discovery.
 
 Run from the repo root:
-    .venv/bin/python test/test_scraper.py [match_id]
+    .venv\\Scripts\\python.exe test\\engine\\test_scraper.py [match_id]
 
 NOTE: this opens a real Chrome window against your live profile and waits for you
 to press ENTER. Everything is inside main() deliberately — at module level, merely
 importing this file (any test runner, any IDE test panel) would launch that browser.
 """
 import sys
-from pathlib import Path
 from urllib.parse import urlsplit
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+import _harness  # puts the repo root on sys.path and the console on UTF-8 (LOW-76: src/ was deleted)
+
+del _harness
 
 DEFAULT_MATCH = "1-ecb64f76-ee62-4b86-bcd9-9968b36fec62"
 DEMO_EXTS = (".dem", ".dem.zst", ".dem.gz")
 
 
 def main() -> int:
-    from scraper import get_demo_urls_from_page
+    from engine.sources.scraper import get_demo_urls_from_page
 
     match_id = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MATCH
 

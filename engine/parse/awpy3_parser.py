@@ -132,8 +132,9 @@ QUARANTINE_REASONS = ("tick_rate_not_128", "too_few_rounds", "not_5v5", "unknown
                       "duration_implausible")
 
 # Linking tolerances in seconds (converted with the demo's tick rate).
-_LINK_TOL_S   = 20.0               # grenade throw -> smoke / fire / flash detonation
-_SEGMENT_GAP  = 8                  # ticks; a gap this long in one entity slot = new grenade
+_LINK_TOL_S     = 20.0             # grenade throw -> smoke / fire detonation; flash detonation -> blind
+_SEGMENT_GAP_S  = 8 / 128          # a gap longer than this in one entity slot = new grenade (8 ticks at 128)
+_DEFUSE_TOL_S   = 4 / 128          # defusing falling edge within this of defuse_complete = not an abort
 ID_SEGMENTS   = 16                 # grenade entity_id = awpy key * 16 + segment ordinal (< 16)
 
 
@@ -224,7 +225,7 @@ def _tick_rate_from_header(header: dict) -> tuple[int | None, float | None]:
         raw = float(ticks) / float(secs)
     except (TypeError, ValueError, ZeroDivisionError):
         return None, None
-    if raw <= 0:
+    if not math.isfinite(raw) or raw <= 0:         # NaN / inf playback timing: unknown (LOW-17)
         return None, None
     return int(round(raw)), raw
 
@@ -622,8 +623,10 @@ def _entity_key(df: pl.DataFrame) -> pl.Expr:
     return pl.when(ser.is_null()).then(eid).otherwise(ser * 65536 + eid)
 
 
-def _collapse_grenades(demo, windows: pl.DataFrame) -> pl.DataFrame:
-    """Trajectory rows -> one row per thrown grenade (first/last tick, last position)."""
+def _collapse_grenades(demo, windows: pl.DataFrame, tick_rate: int | None = None) -> pl.DataFrame:
+    """Trajectory rows -> one row per thrown grenade (first/last tick, last position).
+    A gap longer than `_SEGMENT_GAP_S` (scaled by the demo tick rate) starts a new
+    segment; with an unknown tick rate only a key change does (LOW-16)."""
     schema = {"entity_id": pl.Int64, "thrower_steamid": SID, "type": STR, "throw_tick": TICK,
               "last_tick": TICK, "rest_tick": TICK, "lx": POS, "ly": POS, "lz": POS}
     g = _attr(demo, "grenades")
@@ -632,8 +635,11 @@ def _collapse_grenades(demo, windows: pl.DataFrame) -> pl.DataFrame:
     g = g.with_columns(pl.col("tick").cast(TICK), _entity_key(g).alias("_key"),
                        _map_values(_col(g, "type", "grenade_type"), _GRENADE_TYPE_MAP).alias("_type"),
                        _col(g, "thrower_steamid", dtype=SID).alias("_thrower"))
-    new = ((pl.col("_key") != pl.col("_key").shift(1))
-           | ((pl.col("tick") - pl.col("tick").shift(1)) > _SEGMENT_GAP)).fill_null(True)
+    new = pl.col("_key") != pl.col("_key").shift(1)
+    if tick_rate:
+        gap = int(round(_SEGMENT_GAP_S * tick_rate))
+        new = new | ((pl.col("tick") - pl.col("tick").shift(1)) > gap)
+    new = new.fill_null(True)
     g = g.sort(["_key", "tick"]).with_columns(new.cum_sum().alias("_seg"),
                                               (new.cast(pl.Int64).cum_sum().over("_key") - 1).alias("_ord"))
     x, y, z = (_col(g, c, dtype=POS) for c in ("x", "y", "z"))
@@ -656,11 +662,14 @@ def _collapse_grenades(demo, windows: pl.DataFrame) -> pl.DataFrame:
 
 
 def _link(events: pl.DataFrame, gren: pl.DataFrame, types: list[str], tick_col: str,
-          thrower_col: str, tol: int | None) -> pl.DataFrame:
-    """For each event, the entity_id of the thrower's latest grenade of `types` thrown
-    at or before the event tick (within `tol` ticks) -> column `_gkey`."""
+          thrower_col: str, tol: int | None, gren_tick: str = "throw_tick",
+          strategy: str = "backward") -> pl.DataFrame:
+    """For each event, the entity_id of the thrower's grenade of `types` matched on
+    `gren_tick` (default: the latest thrown at or before the event tick), within `tol`
+    ticks -> column `_gkey`. Blinds match the nearest flash detonation (`last_tick`,
+    "nearest"), so a quick double flash links each blind to its own flash (LOW-15)."""
     cand = (gren.filter(pl.col("type").is_in(types))
-                .select(pl.col("throw_tick").alias("_tt"), pl.col("thrower_steamid").alias(thrower_col),
+                .select(pl.col(gren_tick).alias("_tt"), pl.col("thrower_steamid").alias(thrower_col),
                         pl.col("entity_id").alias("_gkey"))
                 .drop_nulls([thrower_col]).sort("_tt"))
     ev = events.with_columns(pl.col(tick_col).cast(TICK), pl.col(thrower_col).cast(SID, strict=False))
@@ -669,7 +678,7 @@ def _link(events: pl.DataFrame, gren: pl.DataFrame, types: list[str], tick_col: 
     kw = {"tolerance": tol} if tol else {}
     return (ev.sort(tick_col)
               .join_asof(cand, left_on=tick_col, right_on="_tt", by=thrower_col,
-                         strategy="backward", check_sortedness=False, **kw)
+                         strategy=strategy, check_sortedness=False, **kw)
               .drop("_tt"))
 
 
@@ -697,7 +706,7 @@ def _area_frame(demo, name: str, windows: pl.DataFrame, gren: pl.DataFrame, type
 def _build_utility(demo, windows: pl.DataFrame, tick_rate: int | None):
     """grenades, smokes, infernos, flashes, all sharing grenade entity ids."""
     tol  = int(_LINK_TOL_S * tick_rate) if tick_rate else None
-    gren = _collapse_grenades(demo, windows)
+    gren = _collapse_grenades(demo, windows, tick_rate)
     smk  = _area_frame(demo, "smokes", windows, gren, ["smoke"], tol)
     fir  = _area_frame(demo, "fires", windows, gren, ["molotov", "incendiary"], tol)
 
@@ -733,7 +742,8 @@ def _build_utility(demo, windows: pl.DataFrame, tick_rate: int | None):
                       _col(b, "victim_steamid", dtype=SID).alias("player_steamid"),
                       _col(b, "duration", dtype=POS).alias("blind_duration"))
         bl = _assign_round(bl, windows, "detonate_tick", keep_round=False)
-        bl = _link(bl, gren, ["flash"], "detonate_tick", "attacker_steamid", tol)
+        bl = _link(bl, gren, ["flash"], "detonate_tick", "attacker_steamid", tol,
+                   gren_tick="last_tick", strategy="nearest")
         flashes = conform(bl.rename({"_gkey": "entity_id"}).sort("detonate_tick"), "flashes")
     return (conform(g.sort("throw_tick"), "grenades"), conform(smokes.sort("start_tick"), "smokes"),
             conform(infern.sort("start_tick"), "infernos"), flashes)
@@ -754,9 +764,11 @@ def _bomb_raw(demo, windows: pl.DataFrame) -> pl.DataFrame | None:
     return _assign_round(b, windows)
 
 
-def _defuse_events(snap: pl.DataFrame, completes: pl.DataFrame) -> pl.DataFrame:
+def _defuse_events(snap: pl.DataFrame, completes: pl.DataFrame, tick_rate: int | None = None) -> pl.DataFrame:
     """defuse_start / defuse_abort from the per-tick is_defusing flag: a rising edge
-    starts a defuse; a falling edge with no defuse_complete within 4 ticks is an abort."""
+    starts a defuse; a falling edge with no defuse_complete within `_DEFUSE_TOL_S`
+    (scaled by the demo tick rate; same tick only when the rate is unknown) is an abort."""
+    tol = int(round(_DEFUSE_TOL_S * tick_rate)) if tick_rate else 0
     cols = ["tick", "round_num", "event", "steamid", "has_kit", "x", "y", "z"]
     if snap.height == 0 or "is_defusing" not in snap.columns:
         return pl.DataFrame(schema={c: A1_SCHEMAS["bomb"][c] for c in cols})
@@ -773,7 +785,7 @@ def _defuse_events(snap: pl.DataFrame, completes: pl.DataFrame) -> pl.DataFrame:
     if completes.height:
         c = completes.select("round_num", pl.col("tick").alias("_ct"))
         lasts = (lasts.join(c, on="round_num", how="left")
-                      .with_columns(((pl.col("_ct") - pl.col("tick")).abs() <= 4).fill_null(False).alias("_done"))
+                      .with_columns(((pl.col("_ct") - pl.col("tick")).abs() <= tol).fill_null(False).alias("_done"))
                       .group_by(["round_num", "steamid", "tick"], maintain_order=True)
                       .agg(pl.all().exclude("_done", "_ct").first(), pl.col("_done").any())
                       .filter(~pl.col("_done")))
@@ -783,7 +795,7 @@ def _defuse_events(snap: pl.DataFrame, completes: pl.DataFrame) -> pl.DataFrame:
 
 
 def _build_bomb(bomb_raw: pl.DataFrame | None, rounds: pl.DataFrame, snap: pl.DataFrame,
-                dropped: dict) -> pl.DataFrame:
+                dropped: dict, tick_rate: int | None = None) -> pl.DataFrame:
     if bomb_raw is None:
         return empty("bomb")
     mapped = bomb_raw.with_columns(_map_values(pl.col("event"), _BOMB_EVENT_MAP).alias("_ev"))
@@ -798,7 +810,7 @@ def _build_bomb(bomb_raw: pl.DataFrame | None, rounds: pl.DataFrame, snap: pl.Da
         base = (base.join(kit, on=["tick", "steamid"], how="left")
                     .with_columns(pl.when(pl.col("event") == "defuse_complete").then(pl.col("_kit"))
                                     .otherwise(pl.col("has_kit")).alias("has_kit")).drop("_kit"))
-    defuses = _defuse_events(snap, completes)
+    defuses = _defuse_events(snap, completes, tick_rate)
     defuses = defuses.join(base.filter(pl.col("event") == "plant_complete")
                                .group_by("round_num").agg(pl.col("site").last()),
                            on="round_num", how="left")
@@ -881,24 +893,29 @@ def _side_rosters(snap: pl.DataFrame, rounds: pl.DataFrame) -> pl.DataFrame:
 def _scores(rounds: pl.DataFrame, rosters: pl.DataFrame) -> tuple[list, list]:
     """Score of the team on each side before each round. Teams are tracked by roster
     overlap with the first round's CT side, so the halftime swap is handled; knife
-    rounds score nothing. Unknown rosters -> None."""
+    rounds score nothing. Unknown rosters -> None; a won round whose rosters are
+    unknown cannot be credited to a team, so every later score is None too, never a
+    count that is confidently off by one (LOW-14, R7)."""
     by_round = {r["round_num"]: (set(r["ct"] or []), set(r["t"] or [])) for r in rosters.to_dicts()}
     team_a: set | None = None
     wins = {"a": 0, "b": 0}
+    lost = False                                   # a won round went uncounted
     ct_before, t_before = [], []
     for r in rounds.to_dicts():
         ct, t = by_round.get(r["round_num"], (set(), set()))
+        scores = not r.get("is_knife") and r["winner_side"] in ("ct", "t")
         if team_a is None and ct:
             team_a = ct
-        if team_a is None or not (ct or t):
+        if lost or team_a is None or not (ct or t):
             ct_before.append(None)
             t_before.append(None)
+            lost = lost or scores
             continue
         a_is_ct = len(ct & team_a) >= len(t & team_a)
         ct_team, t_team = ("a", "b") if a_is_ct else ("b", "a")
         ct_before.append(wins[ct_team])
         t_before.append(wins[t_team])
-        if not r.get("is_knife") and r["winner_side"] in ("ct", "t"):
+        if scores:
             wins[ct_team if r["winner_side"] == "ct" else t_team] += 1
     return ct_before, t_before
 
@@ -1005,7 +1022,7 @@ def parse(path, *, demo=None, footsteps: bool = True) -> tuple[dict[str, pl.Data
     grenades, smokes, infernos, flashes = _build_utility(demo, rounds, _ticks_per_s(tick_rate))
     blinds  = flashes if _attr(demo, "blinds") is not None else None
     ticks   = _build_ticks(snap, kills, damages, _plant_intervals(braw, rounds), blinds, tick_rate)
-    bomb    = _build_bomb(braw, rounds, snap, dropped)
+    bomb    = _build_bomb(braw, rounds, snap, dropped, _ticks_per_s(tick_rate))
     rosters = _side_rosters(snap, rounds)
     knife   = knife_round_nums(ticks, rounds)
     if knife:

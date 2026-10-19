@@ -1,7 +1,10 @@
 """
 RawTables contract (P2.5.1, Amendment 1): A.1 columns and dtypes, `validate()`,
-`from_parsed()`, and the causal `slice_until()`. Runs on the synthetic stories; the
-golden-demo half of P2.5.1 lives in test_raw_golden.py once a golden demo exists.
+`from_parsed()`, and the causal `slice_until()`. Runs on the synthetic stories. The
+golden-demo half of P2.5.1 runs inside the golden gates: test_states_golden.py and
+test_actions_golden.py parse the pinned golden demo through `RawTables.from_parsed`
+(both exit 2 until a golden demo is pinned); test_awpy3_parser.py <demo> runs the same
+contract checks on any real demo.
 
     .venv\\Scripts\\python.exe test\\engine\\test_raw_schema.py
 """

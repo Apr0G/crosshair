@@ -247,10 +247,13 @@ class Vocab:
             raise ValueError(f"vocab reserved ids {doc.get('reserved')} != {RESERVED}")
         return cls(doc["tables"])
 
-    def save(self, path: Path) -> Path:
+    def save(self, path: Path, exclusive: bool = False) -> Path:
+        """`exclusive=True` refuses an existing file (mode "x"): build() never overwrites a
+        version (LOW-33)."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=1, sort_keys=True), encoding="utf-8")
+        with path.open("x" if exclusive else "w", encoding="utf-8") as f:
+            f.write(json.dumps(self.to_dict(), indent=1, sort_keys=True))
         return path
 
     @classmethod
@@ -491,10 +494,13 @@ class NormStats:
     def from_dict(cls, doc: dict) -> "NormStats":
         return cls(doc["stats"], doc.get("n", 0))
 
-    def save(self, path: Path) -> Path:
+    def save(self, path: Path, exclusive: bool = False) -> Path:
+        """`exclusive=True` refuses an existing file (mode "x"): build() never overwrites a
+        version (LOW-33)."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=1, sort_keys=True), encoding="utf-8")
+        with path.open("x" if exclusive else "w", encoding="utf-8") as f:
+            f.write(json.dumps(self.to_dict(), indent=1, sort_keys=True))
         return path
 
     @classmethod
@@ -675,10 +681,15 @@ def build(catalog, split_file, tiers=None, maps=None, sample_hz: float | None = 
         rows = list(catalog)
     split_doc = splits.load(split_file)
     chosen = {name: select_matches(rows, split_doc, name, tiers, maps) for name in ("train", "val", "test")}
+    for name in chosen:                                   # refuse before anything is written (LOW-33)
+        d = split_dir(name + suffix, out_base)
+        if d.is_dir() and any(d.glob("shard_*.npz")):
+            raise FileExistsError(f"{d} already has shards; write to a new split name or suffix")
 
     vocab = Vocab().fit(_iter_states(chosen["train"], root, sample_hz))
-    version = next_version(out_base, "vocab_v")
-    vocab_path = vocab.save(out_base / f"vocab_v{version}.json")
+    # one version for the vocab / norm pair: past both, so a stray norm_vN is never reused
+    version = max(next_version(out_base, "vocab_v"), next_version(out_base, "norm_v"))
+    vocab_path = vocab.save(out_base / f"vocab_v{version}.json", exclusive=True)
     from engine.manifest import sha256_file
     extra = {"split_file": str(split_file), "split_hash": splits.file_hash(split_file),
              "tiers": list(tiers) if tiers else None, "maps": list(maps) if maps else None,
@@ -689,7 +700,7 @@ def build(catalog, split_file, tiers=None, maps=None, sample_hz: float | None = 
                                      vocab=vocab, base=out_base,
                                      extra={**extra, "matches": [r["match_key"] for r in sel]})
     norm = NormStats.fit(iter_shards("train" + suffix, out_base))
-    norm_path = norm.save(out_base / f"norm_v{version}.json")
+    norm_path = norm.save(out_base / f"norm_v{version}.json", exclusive=True)
     for name in ("train", "val", "test"):                 # every split knows its norm file too
         _amend_index(name + suffix, out_base, norm=norm_path.name, norm_sha256=sha256_file(norm_path))
     return {"vocab": vocab_path, "norm": norm_path, "shards": written,

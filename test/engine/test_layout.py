@@ -60,6 +60,27 @@ def main() -> int:
           and [f["name"] for f in got["files"]] == ["1-abc.parquet"] and len(got["files"][0]["sha256"]) == 64)
     check("no manifest -> None", layout.read_dir_manifest(other.parent) is None)
 
+    # LOW-34: a rewrite after one new match hashes only the new (or changed) file
+    hashed: list[str] = []
+    real_sha = layout._sha256
+    layout._sha256 = lambda p: (hashed.append(Path(p).name), real_sha(p))[1]
+    try:
+        _write(layout.states_path(MV, "2026-09", "1-new", base), [1, 2])
+        m2 = layout.write_dir_manifest(sp.parent, schema_version=3, config_hash="abc123")
+        check("untouched file not re-hashed; the new one hashed (LOW-34)", hashed == ["1-new.parquet"], str(hashed))
+        check("reused hash equals the real hash",
+              {f["name"]: f["sha256"] for f in m2["files"]}["1-abc.parquet"] == real_sha(sp))
+        hashed.clear()
+        _write(sp, [1, 1, 2, 2, 3, 3])                                  # changed content and size
+        m3 = layout.write_dir_manifest(sp.parent, schema_version=3, config_hash="abc123")
+        check("a changed file is re-hashed", hashed == ["1-abc.parquet"]
+              and {f["name"]: f["sha256"] for f in m3["files"]}["1-abc.parquet"] == real_sha(sp), str(hashed))
+    finally:
+        layout._sha256 = real_sha
+    layout.states_path(MV, "2026-09", "1-new", base).unlink()
+    _write(sp, [1, 1, 2, 2, 3])
+    layout.write_dir_manifest(sp.parent, schema_version=3, config_hash="abc123")
+
     section("catalog")
     out  = layout.rebuild_catalog(base, tiers={"1-abc": "faceit_10"})
     rows = {r["match_key"]: r for r in layout.read_catalog(base)}

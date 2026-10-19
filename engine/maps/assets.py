@@ -18,6 +18,7 @@ The optional all-pairs table goes to `data/engine/cache/maps/<map>_navdist.npy`.
 import hashlib
 import heapq
 import math
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -33,6 +34,7 @@ ACTIVE_POOL = ("de_ancient", "de_anubis", "de_dust2", "de_inferno", "de_mirage",
 
 NAVDIST_UNREACHABLE = 65535          # uint16 sentinel in the all-pairs table
 NAVDIST_MAX         = 65534          # longer paths are clipped (none exist on real maps)
+MAP_NAME_RE         = re.compile(r"^[a-z0-9_]+$")   # a map name from a demo header is untrusted (LOW-18)
 
 
 class MapAssetError(RuntimeError):
@@ -118,7 +120,10 @@ _CACHE: dict[tuple[str, str], MapAssets] = {}
 
 def ensure(map_name: str, *, release: str | None = None) -> MapAssets:
     """Load (once per process) the visibility checker and nav mesh of `map_name` from
-    the pinned awpy-data release. Refuses a release or map that is not cached."""
+    the pinned awpy-data release. Refuses a release or map that is not cached, and a
+    name outside `MAP_NAME_RE` before it reaches a file path."""
+    if not isinstance(map_name, str) or not MAP_NAME_RE.fullmatch(map_name):
+        raise MapAssetError(f"invalid map name {map_name!r}: expected lowercase letters, digits and _")
     rel = str(release) if release is not None else pinned_release()
     key = (map_name, rel)
     if key in _CACHE:

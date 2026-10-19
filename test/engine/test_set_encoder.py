@@ -8,15 +8,15 @@ the batch; the pairwise bias is live (and absent with pairwise=False).
 """
 
 import numpy as np
-import torch
 
-from _harness import check, section, summary
-from _fake_states import fake_arrays, finish, test_device
+from _harness import check, require, section, summary
+torch = require("torch", "needs the platform torch build (docs/ENGINE_ENV.md)")   # LOW-61
+from _fake_states import fake_arrays, finish, test_device  # noqa: E402
 
-from engine import config
-from engine.data.dataset import FEATURE_LAYOUT, PAIR_CHANNELS, PLAYER_LAYOUT, SNAPSHOT_KEYS, UTIL_LAYOUT
-from engine.model import batching
-from engine.model.wp_model import WPModel
+from engine import config  # noqa: E402
+from engine.data.dataset import FEATURE_LAYOUT, PAIR_CHANNELS, PLAYER_LAYOUT, SNAPSHOT_KEYS, UTIL_LAYOUT  # noqa: E402
+from engine.model import batching  # noqa: E402
+from engine.model.wp_model import WPModel  # noqa: E402
 
 DEV = test_device()
 print(f"device: {DEV}")

@@ -18,6 +18,14 @@ from engine.maps import assets
 
 
 def main() -> int:
+    section("map name validation (no assets needed)")
+    for bad in ("../de_mirage", "de_mirage/../../x", "de_Mirage", "de mirage", "", "C:\\x", None):
+        try:
+            assets.ensure(bad, release="no-such-release")
+            check(f"map name {bad!r} refused before any path is built", False)
+        except assets.MapAssetError as exc:
+            check(f"map name {bad!r} refused before any path is built", "invalid map name" in str(exc), str(exc))
+
     release = assets.pinned_release()
     if not assets.release_dir(release).is_dir():
         print(f"awpy-data release {release} not cached under {assets.cache_root()}; "
@@ -34,8 +42,11 @@ def main() -> int:
           f"missing {set(assets.ACTIVE_POOL) - set(assets.cached_maps())}")
 
     section("hashes")
-    h1, h2 = assets.asset_hashes("de_mirage"), assets.asset_hashes("de_mirage")
-    check("hashes stable across calls", h1 == h2)
+    h1 = assets.asset_hashes("de_mirage")
+    assets._CACHE.pop(("de_mirage", release), None)       # recompute, not the cached object (LOW-65)
+    h2 = assets.asset_hashes("de_mirage")
+    check("hashes stable across calls (second call re-reads the files)",
+          h1 == h2 and assets.ensure("de_mirage") is not a)
     check("mesh hash is the file's sha256", h1["de_mirage.mesh"] == assets._sha256(a.mesh_path))
     check("nav hash is the file's sha256", h1["de_mirage.nav"] == assets._sha256(a.nav_path))
     check("hashes record the release", h1["release"] == release)

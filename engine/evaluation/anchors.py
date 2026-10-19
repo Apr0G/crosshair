@@ -269,20 +269,25 @@ def first_kills(frame: pl.DataFrame) -> pl.DataFrame:
 
 def opening_kill_band(frame: pl.DataFrame, band: tuple[float, float] = OPENING_BAND,
                       ratio_band: tuple[float, float] = EQUIP_RATIO_BAND) -> dict:
-    """Mean |V_direct| of balanced 5v5 opening kills; in/out of `band`, by map version."""
+    """Mean |V_direct| of balanced 5v5 opening kills; in/out of `band`, by map version.
+    A kill with an unknown alive count is skipped and counted (`n_unknown_alive`), never
+    taken for 5v5 (LOW-39)."""
     name = "opening_kill"
     miss = _has(frame, "type", "tick", "V_direct", "equip_ct_pre", "equip_t_pre")
     if miss:
         return _no_data(name, f"missing columns {miss}", band=list(band))
     fk = first_kills(frame)
-    vals, by_map, n_unbalanced, n_unknown = [], {}, 0, 0
+    vals, by_map, n_unbalanced, n_unknown, n_unknown_alive = [], {}, 0, 0, 0
     for r in fk.iter_rows(named=True):
         ct, t = _num(r.get("equip_ct_pre")), _num(r.get("equip_t_pre"))
         if ct is None or t is None or t <= 0:
             n_unknown += 1
             continue
         a_ct, a_t = _num(r.get("alive_ct_pre")), _num(r.get("alive_t_pre"))
-        if a_ct is not None and a_t is not None and (a_ct != 5 or a_t != 5):
+        if a_ct is None or a_t is None:
+            n_unknown_alive += 1
+            continue
+        if a_ct != 5 or a_t != 5:
             n_unbalanced += 1
             continue
         if not ratio_band[0] <= ct / t <= ratio_band[1]:
@@ -295,11 +300,12 @@ def opening_kill_band(frame: pl.DataFrame, band: tuple[float, float] = OPENING_B
         by_map.setdefault(r.get("map_version") or "unknown", []).append(abs(v))
     if not vals:
         return _no_data(name, "no balanced 5v5 opening kills", band=list(band),
-                        n_rounds=fk.height, n_excluded=n_unbalanced, n_unknown_equipment=n_unknown)
+                        n_rounds=fk.height, n_excluded=n_unbalanced, n_unknown_equipment=n_unknown,
+                        n_unknown_alive=n_unknown_alive)
     value = float(np.mean(vals))
     return {"name": name, "status": IN_BAND if band[0] <= value <= band[1] else OUT_OF_BAND,
             "value": value, "band": list(band), "n": len(vals), "n_rounds": fk.height,
-            "n_excluded": n_unbalanced, "n_unknown_equipment": n_unknown,
+            "n_excluded": n_unbalanced, "n_unknown_equipment": n_unknown, "n_unknown_alive": n_unknown_alive,
             "median": float(np.median(vals)),
             "by_map": {m: {"n": len(v), "mean": float(np.mean(v))} for m, v in sorted(by_map.items())}}
 
@@ -487,11 +493,12 @@ def player_rating_correlation(frame: pl.DataFrame, hltv_csv: Path | None,
             continue
         key = (r["match_key"].strip(), pid)
         if rating is not None and key in sums:
-            name = (r.get("player_name") or "").strip().replace("|", "\\|")
-            if not name:
+            # pname, not name: `name` is the anchor's name returned below (shadowed until 2026-10-19)
+            pname = (r.get("player_name") or "").strip().replace("|", "\\|")
+            if not pname:
                 from engine.report.writer import player_label
-                name = player_label(pid)                 # never the raw SteamID64 (R14, MED-36)
-            pairs.append({"match_key": key[0], "player": name, "sum_V": sums[key], "rating": rating})
+                pname = player_label(pid)                # never the raw SteamID64 (R14, MED-36)
+            pairs.append({"match_key": key[0], "player": pname, "sum_V": sums[key], "rating": rating})
     if len(pairs) < 3:
         return _no_data(name, f"only {len(pairs)} player-maps matched the scored frame", band=f"rho >= {rho_min}")
     rho = spearman([p["sum_V"] for p in pairs], [p["rating"] for p in pairs])

@@ -3,7 +3,8 @@ The engine venv is the one running and every Appendix E package imports (P0.1 te
 
     .venv\\Scripts\\python.exe test\\engine\\test_env.py [--torch]
 
-Exit 2 (not 1) when run from the wrong interpreter (Python < 3.12). torch is a SKIP by
+Exit 2 (not 1) when run from the wrong interpreter (Python < 3.12, or not the project
+`.venv`: `sys.prefix` must be `<repo>/.venv`, LOW-78). torch is a SKIP by
 default: it is installed separately (AMD ROCm wheels, P0.1.3) and its device check is
 P0.1's job; `--torch` imports it in a subprocess and records the device. When
 `requirements-engine.lock` exists, installed versions are compared against it.
@@ -12,6 +13,7 @@ import importlib
 import importlib.metadata
 import subprocess
 import sys
+from pathlib import Path
 
 from _harness import ROOT, check, section, skip, summary
 
@@ -64,6 +66,12 @@ def main() -> int:
         print("  wrong interpreter: the engine needs Python >= 3.12 (.venv\\Scripts\\python.exe)")
         return 2
     check("Python >= 3.12", sys.version_info >= (3, 12))
+    venv = (ROOT / ".venv").resolve()
+    prefix = Path(sys.prefix).resolve()
+    if prefix != venv:
+        print(f"  wrong interpreter: sys.prefix is {prefix}, not the project venv {venv} (.venv\\Scripts\\python.exe)")
+        return 2
+    check("sys.prefix is the project .venv", prefix == venv)
 
     section("Appendix E packages")
     for mod, dist in PACKAGES:

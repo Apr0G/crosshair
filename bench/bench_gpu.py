@@ -6,13 +6,13 @@ ROCm kernels are experimental on this GPU and stay off).
 
     .venv\\Scripts\\python.exe bench\\bench_gpu.py [--iters 200] [--cpu-iters 10]
 
-Writes `data/engine/bench/gpu_<date>.json`. Without a GPU it times the CPU only and
-says so. `--cpu-iters 0` skips the CPU reference.
+Writes `data/engine/bench/gpu_<date>_<hhmmss>_<cuda|cpu>.json` (the device that was
+timed; a second run the same day never overwrites the first). Without a GPU it times
+the CPU only and says so. `--cpu-iters 0` skips the CPU reference.
 """
 import argparse
 import sys
 import time
-from datetime import date
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -23,7 +23,7 @@ import torch                                         # noqa: E402
 import torch.nn as nn                                # noqa: E402
 from torch.nn.attention import SDPBackend, sdpa_kernel   # noqa: E402
 
-from _bench import write                             # noqa: E402
+from _bench import finish, result_name, write        # noqa: E402
 from engine import paths                             # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
@@ -100,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         r = run("cpu", a.cpu_iters, False)
         results.append(r)
         stages["cpu_fp32"] = r["seconds"]
-    out = write(paths.BENCH_DIR / f"gpu_{date.today().isoformat()}.json", stages,
+    out = write(paths.BENCH_DIR / result_name("gpu", "cuda" if gpu else "cpu"), stages,
                 extra={"torch": torch.__version__, "gpu": name, "shape": [B, S, D], "layers": LAYERS,
                        "heads": HEADS, "sdpa_backend": "math", "results": results})
     print(f"-> {out}")
@@ -108,4 +108,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    finish(main())          # os._exit after GPU use (HIP teardown hang), see _bench.finish

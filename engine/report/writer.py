@@ -256,6 +256,12 @@ def _f(v, digits: int = 3) -> str:
     return cards.fmt_signed(v, digits)
 
 
+def _cell(v) -> str:
+    """One markdown table cell: newlines become spaces and '|' is escaped, so a player
+    name (--show-ids) cannot break or forge table columns (LOW-37)."""
+    return " ".join(str(v).splitlines()).replace("|", "\\|")
+
+
 def _header(meta: dict) -> list[str]:
     teams = meta.get("teams") or {}
     vs = f"{teams.get('ct_start') or 'CT'} vs {teams.get('t_start') or 'T'}"
@@ -292,17 +298,18 @@ def _player_table(players: list[dict]) -> list[str]:
         best = max(p["by_type"], key=lambda r: (abs(r["V"]), r["type"]), default=None)
         kill = next((c for c in p.get("by_class") or [] if c["class"] == "kill"), {})
         who = p.get("name") or p["player"]
-        lines.append(f"| {who} | {'/'.join(s.upper() for s in p.get('sides') or [])} | {p['n']} | "
-                     f"{_f(p['V_total'])} | {(best['type'] + ' ' + _f(best['V'])) if best else 'n/a'} | "
-                     f"{_f(kill.get('D_tilde'))} | {_f(kill.get('X_tilde'))} |")
+        cells = [who, "/".join(s.upper() for s in p.get("sides") or []), p["n"], _f(p["V_total"]),
+                 (best["type"] + " " + _f(best["V"])) if best else "n/a",
+                 _f(kill.get("D_tilde")), _f(kill.get("X_tilde"))]
+        lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
     return lines + [""]
 
 
 def _team_table(teams: list[dict]) -> list[str]:
     lines = ["## Teams (by side)", "", "| side | V of actions | clock | buys valued |", "|---|---:|---:|---:|"]
     for t in teams:
-        lines.append(f"| {t['side'].upper()} | {_f(t['V_total'])} | {_f(t['clock_total'])} | "
-                     f"{len(t.get('buys') or [])} |")
+        cells = [t["side"].upper(), _f(t["V_total"]), _f(t["clock_total"]), len(t.get("buys") or [])]
+        lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
     return lines + [""]
 
 

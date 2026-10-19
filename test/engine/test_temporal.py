@@ -7,15 +7,15 @@ time is not), the window_s cutoff, and no NaN from padded rows.
 """
 
 import numpy as np
-import torch
 
-from _harness import check, section, summary
-from _fake_states import fake_arrays, finish, test_device
+from _harness import check, require, section, summary
+torch = require("torch", "needs the platform torch build (docs/ENGINE_ENV.md)")   # LOW-61
+from _fake_states import fake_arrays, finish, test_device  # noqa: E402
 
-from engine import config
-from engine.model import batching
-from engine.model.temporal import TemporalEncoder
-from engine.model.wp_model import WPModel
+from engine import config  # noqa: E402
+from engine.model import batching  # noqa: E402
+from engine.model.temporal import TemporalEncoder  # noqa: E402
+from engine.model.wp_model import WPModel  # noqa: E402
 
 DEV = test_device()
 print(f"device: {DEV}")
@@ -92,15 +92,22 @@ i = int(np.argmax(wi.lengths()))
 win = wi.window(i)
 nxt = win[-1] + 1                                   # next snapshot of the same round, if any
 same_round = nxt < len(snaps) and arrs["round_key"][nxt] == arrs["round_key"][i]
+# LOW-68: the edited next snapshot is gathered into the same batch (as the present of a
+# second window), so the check can fail if anything after the present leaks into window 1
+wnx = wi.window(nxt) if same_round else win
+check("windows never include a later snapshot", all(j <= i for j in win) and all(j <= nxt for j in wnx))
 with torch.no_grad():
-    o1 = model(batching.to_device(batching.gather(arrs, [win]), DEV))
+    o1 = model(batching.to_device(batching.gather(arrs, [win, wnx]), DEV))
     a2 = {k: v.copy() for k, v in arrs.items()}
     if same_round:
         a2["player_num"][nxt] += 7.0
-    o2 = model(batching.to_device(batching.gather(a2, [win]), DEV))
+    o2 = model(batching.to_device(batching.gather(a2, [win, wnx]), DEV))
     o_single = model(batching.to_device(batching.gather(arrs, [win[-1:]]), DEV))
-check("editing the next snapshot (outside the window) leaves the prediction unchanged",
-      same_round and float((o1["win"] - o2["win"]).abs().max()) == 0.0)
+d_present = float((o1["win"][0] - o2["win"][0]).abs())
+d_next    = float((o1["win"][1] - o2["win"][1]).abs())
+check("editing the next snapshot (gathered, but after the present) leaves the prediction unchanged",
+      same_round and d_present <= 1e-6 and d_next > 1e-6, f"window {d_present:.2e}, next {d_next:.2e}")
+o1 = {k: v[:1] for k, v in o1.items()}
 check("1-snapshot window through the model is finite", bool(torch.isfinite(o_single["win"]).all()))
 check("history matters: full window != 1-snapshot window", float((o1["win"] - o_single["win"]).abs().max()) > 1e-6)
 

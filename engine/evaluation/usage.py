@@ -17,8 +17,10 @@ the hard ceiling of its device (`bench.hard_ceiling_gpu` / `_cpu`; total = `timi
 ["total"]`, else the sum of the stage timings; unknown device is judged against the
 GPU ceiling, the stricter one). Malformed lines are counted and skipped.
 
-`engine analyze` does not call `append_usage` yet (owned by `engine/analyze.py`); the
-monitoring checklist in `docs/ENGINE_OPS.md` says so.
+`engine analyze` calls `append_usage` after every successful run that writes to the DB
+(`analyze.append_usage_record`, to `analyze.usage_log_path()`: next to the engine DB
+when `CROSSHAIR_ENGINE_DB` is set, else the default path above); a failed append is
+logged, never raised. Monitoring checklist: `docs/ENGINE_OPS.md`.
 
 Filled by: P12.3.
 """

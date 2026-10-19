@@ -30,6 +30,7 @@ import json
 import math
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +49,7 @@ CURVE_FIELDS = ("stage", "epoch", "step", "lr", "train_loss", "train_win", "trai
                 "train_plant", "train_defuse", "train_tte", "val_logloss", "val_brier", "val_auc",
                 "val_ece", "seconds")
 PARTS = ("win", "hazard", "plant", "defuse", "tte")
+STEP_LOSS_KEEP = 10_000        # per-step losses kept for the summary: the last N only (LOW-36)
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────
@@ -294,7 +296,9 @@ def _train_epoch(model, opt, sched, arrays, wi, sampler, cfg, *, device, epoch, 
         for k, v in parts.items():
             sums[k] += v
         n += 1
-        state.setdefault("step_losses", []).append(float(loss.detach()))
+        if not isinstance(state.get("step_losses"), deque):
+            state["step_losses"] = deque(state.get("step_losses", ()), maxlen=STEP_LOSS_KEEP)
+        state["step_losses"].append(float(loss.detach()))
     return {k: (v / n if n else None) for k, v in sums.items()} | {"n_steps": n}
 
 
@@ -392,7 +396,7 @@ def fit(cfg, train: dict, val: dict, out_dir: Path, *, vocab: Vocab, norm: NormS
             log("interrupted (simulated)", epoch=state["epoch"])
             log.close()
             return {"interrupted": True, "epochs": state["epoch"], "steps": state["step"],
-                    "step_losses": state.get("step_losses", [])}
+                    "step_losses": list(state.get("step_losses", []))}
 
     # ── pro fine-tune stage (P6.3.2): starts from best.pt, never last.pt ──
     ft_info = None
@@ -409,7 +413,7 @@ def fit(cfg, train: dict, val: dict, out_dir: Path, *, vocab: Vocab, norm: NormS
     summary = {"out_dir": str(out_dir), "n_params": model.n_params, "best_val": state["best_val"],
                "best_epoch": state["best_epoch"], "epochs": state["epoch"], "steps": state["step"],
                "finetune": ft_info, "device": device, "flags": model.flags,
-               "step_losses": state.get("step_losses", []), "seconds": time.perf_counter() - t_start}
+               "step_losses": list(state.get("step_losses", [])), "seconds": time.perf_counter() - t_start}
     _write_manifest(out_dir, cfg, model, state, device, len(cand), t_start, ft_info)
     _write_train_md(out_dir, eval_dir, summary)
     log("train done", best_val=state["best_val"], best_epoch=state["best_epoch"], seconds=round(summary["seconds"], 1))

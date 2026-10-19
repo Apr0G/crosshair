@@ -11,10 +11,12 @@ P11.3.3 / P11.3.1 / P12.1 / P0.3.2 guards of the CLI.
   docs/ENGINE_MODELS.md parsing;
 - free space: batch parsing refused below 20 GB, warning below 100 GB.
 """
+import atexit
 import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +25,7 @@ from pathlib import Path
 from _harness import ROOT, check, section, summary
 
 TMP = Path(tempfile.mkdtemp(prefix="crosshair_guards_"))
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)       # LOW-77
 DB_FILE = TMP / "engine.db"
 os.environ["CROSSHAIR_ENGINE_DB"] = str(DB_FILE)
 ENV = {**os.environ, "CROSSHAIR_STUB_PREDICTOR": "1"}

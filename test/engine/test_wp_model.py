@@ -8,16 +8,16 @@ exactly their modules' parameters; parameter count printed (estimate 2-4 M).
 """
 
 import numpy as np
-import torch
 
-from _harness import check, section, skip, summary
-from _fake_states import fake_arrays, finish, test_device
+from _harness import check, require, section, skip, summary
+torch = require("torch", "needs the platform torch build (docs/ENGINE_ENV.md)")   # LOW-61
+from _fake_states import fake_arrays, finish, test_device  # noqa: E402
 
-from engine import config
-from engine.data.dataset import CTX_LAYOUT, PLAYER_LAYOUT, UTIL_LAYOUT
-from engine.model import batching
-from engine.model.train import compute_loss
-from engine.model.wp_model import WPModel
+from engine import config  # noqa: E402
+from engine.data.dataset import CTX_LAYOUT, PLAYER_LAYOUT, UTIL_LAYOUT  # noqa: E402
+from engine.model import batching  # noqa: E402
+from engine.model.train import compute_loss  # noqa: E402
+from engine.model.wp_model import WPModel  # noqa: E402
 
 DEV = test_device()
 print(f"device: {DEV}")

@@ -43,13 +43,16 @@ and the free Downloads tier is 1,500 requests or 200 GB per month, so step 2's
    (P7.2; samples events, order windows and drift intervals from every stored match
    under `data/engine/{states,actions,windows}` with the map's real geometry; exit 0
    green, 1 a failed rate, 2 missing model / calibration / states / map assets). It
-   writes `eval/sanity_cf_wp_v<N>.md` and `models/wp_v<N>/sanity_cf.json`; `registry
+   writes `data\engine\eval\sanity_cf_wp_v<N>.md` and `models/wp_v<N>/sanity_cf.json`; `registry
    adopt` refuses a wp model without a green record. The model-level gate
    (`sanity --model wp_v<N>`, P6.6) is **missing** (`engine/model/sanity.py` does not exist yet). On a failure
    follow the P7.3 loop: one remedy per iteration, retrain, rerun P6.5–P6.6 and P7.2,
-   log it in `eval/DECISION_wp_v<N>.md`, at most five iterations, then escalate to Faig.
-9. **Value models.** `train-q` and `build-neighbours` are **missing** as runnable
-   commands (`engine.value.q_model` and `engine.value.neighbours` have no `main` yet).
+   log it in `data\engine\eval\DECISION_wp_v<N>.md`, at most five iterations, then escalate to Faig.
+9. **Value models.** From the valued actions (with `h_pre` from the adopted win model):
+   `... -m engine.cli train-q --valued <actions_valued.parquet> --split-file data\engine\datasets\splits_v<N+1>.json [--wp-model wp_v<N>]`,
+   then `... -m engine.cli build-neighbours --valued <same> --q-model q_v<N> --split-file <same>`.
+   Both exit 2 while an input is missing. `analyze --q-model / --neighbours` refuses
+   them until they are adopted like the win model (step 11).
 10. **Evaluate.** `... -m engine.cli eval --model wp_v<N> --calibration`; attribution
     eval (`--attribution`) is **missing**; anchors: see P11 below.
 11. **Decide.** Apply the P6.7.2 rules in `docs/ENGINE_MODELS.md`. If they pass:
@@ -57,7 +60,7 @@ and the free Downloads tier is 1,500 requests or 200 GB per month, so step 2's
     The registry refuses numbers that fail the rule. Retire the old row by editing its
     status cell in place.
 12. **Bench.** `... -m engine.cli bench analyze` on the golden demo; paste the result
-    into `eval/bench_<date>.md`. Over budget: turn the knobs in the P10.3.2 order
+    into `data\engine\eval\bench_<date>.md`. Over budget: turn the knobs in the P10.3.2 order
     (`los_cache`, `drift_threshold_wp`, `shapley_samples`, `k_neighbours`, chart
     resolution). Never `sample_hz`.
 13. **Record** what changed in `docs/ENGINE_PROGRESS.md` (Faig maintains it).
@@ -94,10 +97,12 @@ and the free Downloads tier is 1,500 requests or 200 GB per month, so step 2's
 
 ## Monitoring (P12.3)
 
-- Every `engine analyze` run should append one line to
-  `data\engine\eval\usage.jsonl` (run_id, map_version, tier, timings, warnings count,
-  conservation residual) through `engine.evaluation.usage.append_usage`.
-  **Not wired yet**: `engine/analyze.py` does not call it.
+- Every successful `engine analyze` run that writes to the DB (not `--no-db`) appends
+  one line to `data\engine\eval\usage.jsonl` (run_id, match_key, map_version, tier,
+  device, timings, warnings count, max conservation residual) through
+  `engine.evaluation.usage.append_usage` (`analyze.append_usage_record`); with
+  `CROSSHAIR_ENGINE_DB` set the file sits next to that DB instead. A failed append is
+  logged, never raised.
 - Weekly: `... -m engine.evaluation.usage` prints runs by tier and map version, every
   run with |residual| > 1e-3, and every run over the time ceiling (120 s GPU,
   300 s CPU from `bench.hard_ceiling_*`). Investigate any listed run before the next
@@ -114,9 +119,8 @@ and the free Downloads tier is 1,500 requests or 200 GB per month, so step 2's
   and nicknames must not enter the public repo) filled by hand for ≥ 50 test matches
   (columns `match_key,map,steamid64,player_name,hltv_rating`, `match_key` as the
   engine names the match). Man advantage needs a `W` column on the states.
-  `engine.cli eval --anchors` points at `engine.eval.anchors`, which is not where the
-  module lives (`engine.evaluation.anchors`); until the CLI is corrected, call the
-  module directly.
+  `... -m engine.cli eval --anchors --model wp_v<N> -- --scored <...> --actions <...> --states <...>`
+  runs the same module (`engine.evaluation.anchors`, `--model` passed as `--model-dir`).
 - **Review cycle (P11.2):**
   `... -m engine.evaluation.review --scored <...> --actions <...> --states <...> --cycle 1`
   writes `data\engine\eval\review_round_<i>\case.json` for 20 rounds covering the ten
@@ -140,10 +144,10 @@ Everything produced by commands, nothing hand-edited:
 - [ ] data-provenance statement (sources, terms read, dates) and the FACEIT Downloads approval
 - [ ] anchors report (`anchors_wp_v<N>.md`)
 - [ ] calibration report (`eval --calibration`)
-- [ ] ablation table (`eval/ablations_v<N>.md`, P6.7.1)
+- [ ] ablation table (`data\engine\eval\ablations_v<N>.md`, P6.7.1)
 - [ ] counterfactual sanity-gate report (`sanity --counterfactual`)
 - [ ] review log with at least two cycles and the regression tests
-- [ ] bench table (`eval/bench_<date>.md`) within the C3 ceiling
+- [ ] bench table (`data\engine\eval\bench_<date>.md`) within the C3 ceiling
 - [ ] one-page method summary: the plain-language explanation (plan Appendix I) plus
       the formula appendix (plan Appendix B)
 - [ ] `docs/ENGINE_MODELS.md` naming every model the reports used
@@ -157,10 +161,7 @@ Everything produced by commands, nothing hand-edited:
 | FACEIT competition discovery | organizer → championships → past matches (Amendment 2 P1.2.2) | `engine/sources/faceit_api.py` |
 | monthly quota ledger | requests + bytes per month, stop at the cap (Amendment 2 P1.2.3) | `engine/db.py` (ask-before), `engine/ingest.py` |
 | pro transfer report | `eval --transfer` (Amendment 2 P11.4) | `engine/cli.py` |
-| value models | `train-q`, `build-neighbours` (no `main`) | `engine/value/q_model.py`, `neighbours.py` |
 | model sanity gate | `sanity --model` | `engine/model/sanity.py` |
 | attribution eval | `eval --attribution` | `engine/attribution/evaluate.py` |
-| anchors via CLI | `eval --anchors` points at the wrong module path | `engine/cli.py` `EVAL_TARGETS` |
 | map assets / callouts rebuild | no command | `engine/maps/` |
-| usage line per analyze | `append_usage` not called | `engine/analyze.py` |
 | per-patch constants | config keyed by game build | `engine/config.py` |

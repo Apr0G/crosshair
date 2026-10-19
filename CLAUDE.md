@@ -198,7 +198,7 @@ states and actions are separate CLI stages. A source exposes
 
 ### Invariants (still in force, v2 locations)
 - **Idempotency:** never double-insert a match. `engine.db.is_processed_any` checks the
-  BO1 id `<mid>` and the series forms `<mid>_m1`, `_m2`, …; keep both in any new source.
+  BO1 id `<mid>` and `<mid>_m1` for a bare id (`<mid>_mN` checks itself and `<mid>`; UNIQUE `demo_sha256` backstops `_m2`…); keep both in any new source.
   The same file from two sources is caught by the unique `demo_sha256`.
 - All sources produce identical downstream rows; they differ only in how the `.dem`
   reaches disk.

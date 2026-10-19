@@ -12,14 +12,14 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-import torch
 
-from _harness import check, section, summary
-from _fake_states import fake_arrays, finish, test_device
+from _harness import check, require, section, summary
+torch = require("torch", "the training loop needs the platform torch build (docs/ENGINE_ENV.md)")   # LOW-61
+from _fake_states import fake_arrays, finish, test_device  # noqa: E402
 
-from engine import config, manifest
-from engine.data import dataset
-from engine.model import checkpoints, train
+from engine import config, manifest  # noqa: E402
+from engine.data import dataset  # noqa: E402
+from engine.model import checkpoints, train  # noqa: E402
 
 DEV = test_device()
 print(f"device: {DEV}")
@@ -80,7 +80,10 @@ with tempfile.TemporaryDirectory() as d:
     check("evaluate() metrics dict complete", want <= set(res), str(sorted(want - set(res))))
     check("per-phase covers every labelled snapshot", sum(m["n"] for m in res["per_phase"].values()) == res["n"])
     check("martingale rows for k in 1, 5, 10", {r["k"] for r in res["martingale"]["rows"]} == {1, 5, 10})
-    check("target_failures returns a list", isinstance(train.target_failures(res, cfg), list))
+    # LOW-79: the ECE target (R6: <= 0.02) is actually judged
+    ok_r, bad_r = train.target_failures({"ece": 0.019}, cfg), train.target_failures({"ece": 0.021}, cfg)
+    check("target_failures: ECE 0.019 passes, 0.021 fails", ok_r == [] and len(bad_r) == 1
+          and bad_r[0].startswith("ECE 0.0210"), f"{ok_r} / {bad_r}")
     md = train.eval_markdown("t", res)
     check("eval markdown has the breakdowns", "By phase" in md and "By map" in md and "Martingale" in md)
     from engine.model import calibrate
@@ -111,6 +114,15 @@ with tempfile.TemporaryDirectory() as d:
     check("resumed parameters == uninterrupted parameters (within 1e-3)", pd <= TOL_PARAM, f"max |diff| {pd:.2e}")
     ry = list(csv.DictReader(open(d / "y" / "curves.csv", encoding="utf-8")))
     check("resumed curves.csv has both epochs", [int(r["epoch"]) for r in ry] == [0, 1])
+    keep0 = train.STEP_LOSS_KEEP
+    train.STEP_LOSS_KEEP = 3                                  # LOW-36: only the last N step losses kept
+    try:
+        sc = train.fit(cfg, tr, va, d / "cap", **rk)
+    finally:
+        train.STEP_LOSS_KEEP = keep0
+    check("step losses capped at STEP_LOSS_KEEP, the last ones kept (LOW-36)",
+          sc["steps"] == 10 and len(sc["step_losses"]) == 3
+          and np.allclose(sc["step_losses"], sx["step_losses"][-3:], atol=TOL_LOSS), str(len(sc["step_losses"])))
 
     # ── fine-tune loads best, not last ──
     section("pro fine-tune loads best.pt, not last.pt")

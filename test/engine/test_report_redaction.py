@@ -67,8 +67,10 @@ for text, name in ((js, "report.json"), (md, "report.md")):
     check(f"{name}: no SteamID64", STEAMID not in text and not re.search(r"7656119\d{10}", text))
     check(f"{name}: no repo path", str(Path(__file__).resolve().parents[2]) not in text)
 msgs = {w["code"]: w["message"] for w in rep["warnings"]}
-check("spaced path under home redacted whole (MED-22)", "Some User" not in js and "Program Files" not in js
-      and "model dir" not in js and msgs["seed_spaced"].startswith("loaded <path>"), msgs["seed_spaced"])
+spaced_left = [k for k, w in (("user", "Some User"), ("program", "Program Files"), ("model", "model dir")) if w in js]
+check("spaced path under home redacted whole (MED-22)", not spaced_left
+      and msgs["seed_spaced"].startswith("loaded <path>"),
+      f"segments left: {spaced_left}, starts with 'loaded <path>': {msgs['seed_spaced'].startswith('loaded <path>')}")
 leaks = writer.find_leaks({"m": f"see {SPACED} now", "u": URL, "s": STEAMID})
 check("find_leaks sees the spaced path, the URL and the id, and never echoes them (MED-23)",
       len(leaks) == 3 and all(("Some User" not in l and "SECRETSIG" not in l and STEAMID not in l) for l in leaks),
@@ -95,6 +97,16 @@ check("find_leaks with show_ids: no URL / path", writer.find_leaks(rep2, out2, s
 check("URL still redacted with show_ids", "http" not in js2)
 check("a SteamID64 in free text is kept with show_ids", STEAMID in js2)
 check("report still validates", writer.validate(rep2) == [])
+# LOW-37: a name with '|' or a newline stays inside its cell of the markdown player table
+rep3 = json.loads(js2)
+rep3["players"][0]["name"] = "evil|name\nnext"
+md3 = writer.markdown(rep3).splitlines()
+head = next(l for l in md3 if l.startswith("| player |"))
+row = [l for l in md3 if "evil" in l]
+ncols = lambda line: len(re.findall(r"(?<!\\)\|", line))   # noqa: E731
+check("player table: '|' escaped and newline folded in a --show-ids name (LOW-37)",
+      len(row) == 1 and "evil\\|name next" in row[0] and ncols(row[0]) == ncols(head),
+      f"rows {len(row)}, cols {[ncols(r) for r in row]} vs {ncols(head)}")
 
 section("scrub_text units")
 check("url", writer.scrub_text("see http://x.y/z?a=1 now") == "see <url> now")

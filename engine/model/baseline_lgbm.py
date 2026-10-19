@@ -4,7 +4,7 @@ The numbers the NN must beat on pro held-out months.
 
     from engine.model import baseline_lgbm as bl
     X, names = bl.flatten(arrs)                       # from the same shards as the NN
-    booster  = bl.train(train_arrs, val_arrs)         # early stopping on val
+    booster  = bl.train(train_arrs, val_arrs)         # early stopping on val pro (all val if no pro)
     p        = bl.predict(booster, test_arrs)
     res      = bl.evaluate(booster, test_arrs, cfg)   # logloss, brier, auc, ece, reliability, per phase/map
     bl.save(out_dir, booster, res, ...)               # models/baseline_v<N>/
@@ -83,11 +83,12 @@ def flatten(arrays: dict) -> tuple[np.ndarray, list[str]]:
         add(f"{t}_hp_sum", hp.sum(1))
         add(f"{t}_hp_mean", np.where(n_alive > 0, hp.sum(1) / np.maximum(n_alive, 1), np.nan))
         add(f"{t}_armor_sum", np.where(a, pv["armor"][:, sl], 0.0).sum(1))
-        add(f"{t}_equip_sum", np.where(a, np.nan_to_num(pv["equipment_value"][:, sl]), 0.0).sum(1))
+        # team sums: NaN when any alive player's value is unknown, never 0 for it (R7, LOW-31)
+        add(f"{t}_equip_sum", np.where(a, pv["equipment_value"][:, sl], 0.0).sum(1))
         add(f"{t}_nades", np.where(a, nades[:, sl], 0.0).sum(1))
         add(f"{t}_blind", (a & (np.nan_to_num(pv["flash_duration_remaining"][:, sl]) > 0)).sum(1))
-        add(f"{t}_helmets", np.where(a, np.nan_to_num(_values(pn, _P, "has_helmet")[:, sl]), 0.0).sum(1))
-        add(f"{t}_defusers", np.where(a, np.nan_to_num(pv["has_defuser"][:, sl]), 0.0).sum(1))
+        add(f"{t}_helmets", np.where(a, _values(pn, _P, "has_helmet")[:, sl], 0.0).sum(1))
+        add(f"{t}_defusers", np.where(a, pv["has_defuser"][:, sl], 0.0).sum(1))
         add(f"{t}_speed_mean", _nanmean(np.where(a, pv["speed"][:, sl], np.nan), (1,)))
         d  = dist[:, sl, sl]
         aa = a[:, :, None] & a[:, None, :] & ~np.eye(5, dtype=bool)[None]
@@ -130,6 +131,17 @@ def _labelled(arrays: dict) -> np.ndarray:
     return np.flatnonzero(~np.isnan(arrays["y_win"]))
 
 
+def early_stop_rows(val_arrays: dict) -> np.ndarray:
+    """Labelled val rows the booster early-stops on: the pro ones when any exist, as the
+    NN selects on val pro (train.fit), else every labelled row (LOW-30, 2026-10-19)."""
+    lab = _labelled(val_arrays)
+    tier = val_arrays.get("tier")
+    if tier is None:
+        return lab
+    pro = lab[np.asarray(tier)[lab] == "pro"]
+    return pro if len(pro) else lab
+
+
 def default_params(n_train: int, seed: int) -> dict:
     return {"objective": "binary", "metric": "binary_logloss", "learning_rate": 0.05,
             "num_leaves": 63, "min_data_in_leaf": int(max(5, min(100, n_train // 50))),
@@ -140,7 +152,7 @@ def default_params(n_train: int, seed: int) -> dict:
 def train(train_arrays: dict, val_arrays: dict, *, seed: int = 1337, num_boost_round: int = 2000,
           early_stopping: int = 50, params: dict | None = None):
     import lightgbm as lgb
-    tr, va = _labelled(train_arrays), _labelled(val_arrays)
+    tr, va = _labelled(train_arrays), early_stop_rows(val_arrays)
     Xtr, names = flatten({k: v[tr] for k, v in train_arrays.items()})
     Xva, _     = flatten({k: v[va] for k, v in val_arrays.items()})
     cats = categorical(names)
@@ -205,7 +217,7 @@ def save(out_dir: Path, booster, results: dict, *, cfg=None, extra: dict | None 
 def main(argv: list[str] | None = None) -> int:
     from engine import config, paths
     from engine.data import dataset
-    from engine.model import checkpoints
+    from engine.value._paths import next_version_dir      # torch-free (LOW-32)
     ap = argparse.ArgumentParser(description="Train and evaluate the LightGBM yardstick (P6.1).")
     ap.add_argument("--train", default="train")
     ap.add_argument("--val", default="val")
@@ -228,10 +240,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     te    = dataset.take(te, np.flatnonzero(te["tier"] == "pro")) if (te["tier"] == "pro").any() else te
     vocab = dataset.Vocab.load(a.vocab) if a.vocab else None
-    b     = train(tr, va, seed=cfg.train.seed)
+    b     = train(tr, va, seed=cfg.train.seed)          # early-stops on val pro when present
     res   = {"val": evaluate(b, va, cfg, vocab), "test_pro": evaluate(b, te, cfg, vocab)}
     res["best_iteration"] = res["val"]["best_iteration"]
-    out = Path(a.out) if a.out else checkpoints.next_version_dir(paths.MODELS_DIR, "baseline_v")
+    out = Path(a.out) if a.out else next_version_dir(paths.MODELS_DIR, "baseline_v")
     save(out, b, res, cfg=cfg)
     print(f"{out}: test pro logloss={res['test_pro']['logloss']} brier={res['test_pro']['brier']} "
           f"auc={res['test_pro']['auc']} ece={res['test_pro']['ece']}")

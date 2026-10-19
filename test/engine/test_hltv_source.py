@@ -8,10 +8,13 @@ No network. Checks: page parsing, naming, extraction, a corrupt zip (bad CRC and
 truncated) and a .rar leave no partial files, redaction of signed URLs in errors,
 >= 10 s spacing between requests, and the source interface through ingest.run.
 """
+import atexit
 import contextlib
 import io
 import os
+import shutil
 import socket
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -23,6 +26,7 @@ from pathlib import Path
 from _harness import check, section, summary
 
 TMP = Path(tempfile.mkdtemp(prefix="ch_hltv_test_"))
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)       # LOW-77
 os.environ["CROSSHAIR_ENGINE_DB"] = str(TMP / "engine.db")
 
 from engine import db, ingest, paths  # noqa: E402
@@ -202,6 +206,13 @@ def test_server() -> None:
               row["event"] == "BLAST Fall" and row["date"] == DATE and row["source"] == "hltv"
               and row["tier"] == "pro", str(row))
         check("files under demos/pro", all((paths.DEMOS_PRO_DIR / f"{k}.dem").is_file() for k in want))
+        con = sqlite3.connect(db.db_path())
+        stored = [con.execute("SELECT demo_url FROM processed WHERE match_id=?", (k,)).fetchone()[0] for k in want]
+        con.close()
+        user = Path.home().name
+        check("processed.demo_url is the HLTV page URL, no file:// URI or user name (LOW-10)",
+              all(u == f"{base}/matches/7/run" for u in stored)
+              and not any("file://" in u or (user and user in u) for u in stored), str(stored))
         before = len(Handler.hits)
         n_failed, out = _quiet(ingest.run, hltv, tier="pro", header_reader=hdr,
                                matches=[f"{base}/matches/7/run"], base_url=base, throttle=fast)

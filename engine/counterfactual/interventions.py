@@ -431,22 +431,30 @@ def redo_kill(state: Snapshot, kill: Action, state_post: Snapshot | None, *, geo
 def _restore_hp(s: Snapshot, attacker_id, victim_id, dmg: float, armor: float,
                 ref: Snapshot | None, what: str) -> None:
     """Give `victim_id` back up to `dmg` health / `armor` armor, capped at its `ref`
-    values (100 without one); the attacker's `damage_round` drops by the health
-    actually restored. A dead victim is left alone (the kill owns it)."""
+    values (100 without one). A dead victim's health is left alone (the kill owns it).
+    The attacker's `damage_round` (owned by this damage) drops by `dmg`, floored at the
+    attacker's `ref` value, so the roll-back also happens when a same-window kill undo
+    already revived the victim at full `ref` health, or the victim is still dead, in any
+    undo order (LOW-28). Without a usable `ref` it drops by the health restored."""
     if dmg < 0 or armor < 0:
         raise InterventionError(f"{what}: negative damage {dmg}/{armor}")
     v = s.players[_slot(s, victim_id, f"{what} victim")]
-    if v.alive != 1:
+    got_h = 0.0
+    if v.alive == 1:
+        rv = _ref_player(ref, victim_id)
+        cap_h = rv.health if rv is not None and rv.alive == 1 else MAX_HEALTH
+        cap_a = rv.armor if rv is not None and rv.alive == 1 else MAX_HEALTH
+        got_h = min(dmg, max(0.0, cap_h - v.health))
+        got_a = min(armor, max(0.0, cap_a - v.armor))
+        v.health = v.health + got_h
+        v.armor  = v.armor + got_a
+    if attacker_id is None or attacker_id == victim_id:
         return
-    rv = _ref_player(ref, victim_id)
-    cap_h = rv.health if rv is not None and rv.alive == 1 else MAX_HEALTH
-    cap_a = rv.armor if rv is not None and rv.alive == 1 else MAX_HEALTH
-    got_h = min(dmg, max(0.0, cap_h - v.health))
-    got_a = min(armor, max(0.0, cap_a - v.armor))
-    v.health = v.health + got_h
-    v.armor  = v.armor + got_a
-    if attacker_id is not None and attacker_id != victim_id and got_h > 0:
-        a = s.players[_slot(s, attacker_id, f"{what} attacker")]
+    a  = s.players[_slot(s, attacker_id, f"{what} attacker")]
+    ra = _ref_player(ref, attacker_id)
+    if ra is not None and not _bad(ra.damage_round) and not _bad(a.damage_round):
+        a.damage_round = max(min(a.damage_round, ra.damage_round), a.damage_round - dmg)
+    elif got_h > 0:
         a.damage_round = max(0.0, a.damage_round - got_h)
 
 
@@ -474,9 +482,10 @@ def undo_damage(state: Snapshot, damage: Action, state_pre: Snapshot | None = No
                 geometry=None) -> Snapshot:
     """Undo non-lethal damage: the victim's health/armor rise by `damage_total` /
     `armor_damage`, capped at `state_pre` values (100 without it), and the attacker's
-    `damage_round` drops by the health restored. Idempotent once capped. A dead victim
-    is a no-op (the kill owns the victim). Preconditions: type damage with `victim_id`
-    and a non-negative `damage_total`."""
+    `damage_round` drops by `damage_total`, floored at its `state_pre` value (by the
+    health restored without `state_pre`; see `_restore_hp`). Idempotent once capped. A
+    dead victim's health is untouched (the kill owns the victim). Preconditions: type
+    damage with `victim_id` and a non-negative `damage_total`."""
     _require_type(damage, ("damage",), "undo_damage")
     vid = _param(damage, "victim_id")
     dmg = float(_param(damage, "damage_total"))

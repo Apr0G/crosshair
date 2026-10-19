@@ -153,6 +153,40 @@ def test_validation() -> None:
     ok, why = rejects(d)
     check("rejects missing key", ok, why)
     check("accepts sample_hz 4", not rejects(with_value(data, ["sampling", "sample_hz"], 4))[0])
+    for desc, path, value in (("accepts qa.max_outliers 0 (LOW-05)", ["qa", "max_outliers"], 0),
+                              ("accepts train.seed 0 (LOW-05)", ["train", "seed"], 0)):
+        ok, why = rejects(with_value(data, path, value))
+        check(desc, not ok, why)
+    for desc, path, value in (("rejects qa.max_outliers -1", ["qa", "max_outliers"], -1),
+                              ("rejects a 0 s martingale horizon (LOW-05)", ["calib", "martingale_horizons_s"], [0, 5, 10]),
+                              ("rejects duplicate martingale horizons (LOW-05)", ["calib", "martingale_horizons_s"], [5, 5, 10])):
+        ok, why = rejects(with_value(data, path, value))
+        check(desc, ok, why)
+
+
+def test_load_errors() -> None:
+    section("load(): malformed and duplicate-key YAML (LOW-06, LOW-75)")
+    text = config.DEFAULT_PATH.read_text(encoding="utf-8")
+    with tempfile.TemporaryDirectory() as tmp:
+        dup = Path(tmp) / "dup.yaml"
+        dup.write_text(text.replace("sampling:\n", "sampling:\n  sample_hz: 4\n", 1), encoding="utf-8")
+        try:
+            config.load(dup)
+            check("duplicate key refused with file name and key", False, "accepted (last one won)")
+        except config.ConfigError as e:
+            check("duplicate key refused with file name and key", "dup.yaml" in str(e) and "sample_hz" in str(e)
+                  and "line" in str(e), str(e))
+        bad = Path(tmp) / "bad.yaml"
+        bad.write_text("sampling:\n  sample_hz: [1, 2\n", encoding="utf-8")
+        try:
+            config.load(bad)
+            check("malformed YAML -> ConfigError naming the file and line", False, "accepted")
+        except config.ConfigError as e:
+            check("malformed YAML -> ConfigError naming the file and line", "bad.yaml" in str(e) and "line" in str(e),
+                  str(e))
+        same = Path(tmp) / "same.yaml"
+        same.write_text(text, encoding="utf-8")
+        check("the default file still loads through the strict loader", config.load(same) == config.load())
 
 
 def test_hash() -> None:
@@ -201,6 +235,7 @@ def test_budget_mirror() -> None:
 def main() -> int:
     test_default()
     test_validation()
+    test_load_errors()
     test_hash()
     test_budget_mirror()
     return summary()

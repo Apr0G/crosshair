@@ -27,6 +27,14 @@ make that distinction visible, and a false `✓` there is worse than an admitted
 **Two reads per file.** First pass for what the code is trying to do. Second pass, line by
 line, against the sections below. Findings almost always come from the second pass.
 
+**Legacy names.** Section A follows the engine (R1–R22, CLAUDE.md "Engine v2"). Sections
+B–L were first written against the legacy `src/` pipeline, deleted in plan Amendment 1;
+where an item names a deleted file or function (`main.py`, `pipeline.run`, `store_match`,
+`state_sampler`, `win_probability`, `score_impact`, `data/crosshair.db`), apply it to the
+engine counterpart in CLAUDE.md's module map (`engine/cli.py`, `engine.ingest.run`,
+`engine.ingest.register_demo` / `engine/db.py`, `engine/state/`, `engine/model/`,
+`engine/attribution/` + `engine/value/`, `data/engine/engine.db`).
+
 ---
 
 ## A. Project invariants (highest yield — check these first)
@@ -34,44 +42,40 @@ line, against the sections below. Findings almost always come from the second pa
 These come from `CLAUDE.md`. A violation is at minimum HIGH, even with no exploit path,
 because each one silently corrupts data or invalidates model numbers.
 
-- [ ] **P1 — no double-insert.** Trace every path that reaches `db.store_match`. Is
-      `is_processed` checked before *every* one? Is it checked for **both** `<mid>` and
-      `<mid>_m1` forms? `store_match` is one transaction that DELETEs the match's rows
-      and re-inserts them with the marker — confirm nothing writes to `events` /
-      `round_states` outside it, and that the transaction still covers all three tables.
-- [ ] **P1b —** is there a uniqueness constraint backing the dedup, or is it check-then-act
-      only? What happens if the same `match_id` is inserted twice?
-- [ ] **P2 — source parity.** Do `scraper` and `faceit_api` produce the same `match_id`
-      shape, the same decompression result, the same `demo_url` recorded? Any divergence
-      means the two paths write different rows.
-- [ ] **P3 — the seam.** Does anything bypass `pipeline.ingest_demo` to write to the DB?
-      (`process_one` and `main.cmd_demo` must both end there; `test/test_local_demo.py`
-      must not write at all.)
-- [ ] **P4 — source interface.** Do both source modules expose exactly
-      `iter_unprocessed_demos(...)` and `download_demo(url, dest)` with compatible
-      signatures? Does `pipeline` call anything else on them?
-- [ ] **P5 — impact sign.** `p_after - p_before` for CT, negated for T. Verify the actual
-      comparison string: is it `"ct"`, `"CT"`, or `"Ct"` that arrives, and is it
-      normalised before comparison? A side string that never matches makes every event T-signed.
-- [ ] **P6 — split leakage.** Is the split still `GroupShuffleSplit(groups=match_id)`?
-      Does any preprocessing (scaling, encoding, imputation, category fitting) happen
-      **before** the split, on the full frame? That leaks too.
-- [ ] **P7 — calibration.** Any change to objective, class weights, or post-processing that
-      would break calibration while leaving AUC fine?
-- [ ] **P8 — feature parity.** Cross-check three lists: what `state_sampler` emits, what
-      `db._STATES_SQL` binds, and `win_probability.FEATURES`. Any feature in
-      `FEATURES` that the DB lacks fails at query time; any column the sampler emits that
-      the insert omits is silently dropped.
-- [ ] **P9 — additive-only schema.** Does `_init_schema` match what the writers insert?
-      Can it add a column to an existing DB? (It cannot — `CREATE TABLE IF NOT EXISTS`
-      is a no-op on an existing table. Confirm the consequences are documented and handled.)
-- [ ] **P10 — secrets.** No key in source, no key in a default argument, no key in a
-      committed file, no key in a printed URL.
-- [ ] **P11 — invented API surface.** Every FACEIT field accessed (`demo_url`, `payload`,
-      `download_url`, `items`, `faceit_elo`, `player_id`, `match_id`) — is it accessed
-      defensively, and does the code assume a shape the API does not guarantee?
-- [ ] **P12–P15 —** scraper untouched, `/security-review` documented, tests still plain
-      scripts, `.venv/bin/python` used in docs and examples.
+- [ ] **R1 — no double-insert.** Trace every path that reaches `engine.ingest.register_demo`
+      / `db.register_match`. Is `db.is_processed_any` checked before *every* download, for
+      the id forms `id_forms` documents (bare `<mid>` + `<mid>_m1`; `<mid>_mN` + `<mid>`)?
+      Is the insert one transaction, and does the UNIQUE `demo_sha256` back it up? What
+      happens when the same key arrives with a different file?
+- [ ] **R2 — source parity.** Do all sources (`faceit_api`, `scraper`, `hltv`, `hf_archive`)
+      reach `ingest.process_one` and write the same row shape, with a redacted, meaningful
+      `demo_url`? Any divergence means two paths write different rows.
+- [ ] **R3 — sign convention.** CT-positive internally; a T actor's value is negated exactly
+      once. Is the side string normalised (`ct`/`t`) before comparison?
+- [ ] **R4 — splits.** Frozen month splits with match grouping (`engine/data/splits.py`),
+      latest months test, files written once (mode `x`). Does anything fit vocab / norms /
+      models on rows outside train? Does any command accept "no split" silently?
+- [ ] **R5 — leakage.** Every feature has a `LIVE_SAFE` entry; nothing reads `end_tick`,
+      the winner, or a future snapshot. Does `test_leakage.py` exercise the feature?
+- [ ] **R6 — calibration.** ECE ≤ 0.02 on the baseline test tier; does the Predictor ever
+      serve an uncalibrated output silently?
+- [ ] **R7 / R8 — unknowns.** No `0` / `"?"` sentinel for unknown; no `or` used as a
+      null-coalesce over numerics.
+- [ ] **R9 — redaction.** Every print, exception, log, file and DB write of a URL goes
+      through `redact_url` / `engine.log.redact_text`; no URL truncated by length.
+- [ ] **R10 — tick rate.** From the demo header, never a literal; quarantine refuses
+      non-128 on every path (batch too, not only `analyze`).
+- [ ] **R11 — invented API surface.** Every FACEIT field accessed (`demo_url`, `payload`,
+      `download_url`, `items`, `roster[].game_skill_level`, …) — accessed defensively and
+      verified against the docs or a real response?
+- [ ] **R12 — schema.** Additive migrations in `_MIGRATIONS` keyed by `user_version`;
+      `_init_schema` and the migrations agree; a newer file is refused.
+- [ ] **R13–R16 —** `sample_hz` untouched for latency; reports carry no outside paths, URLs
+      or raw SteamIDs; non-training modules do not import torch at import time; tests are
+      plain scripts that write only to temp dirs and exit 0/1/2.
+- [ ] **R17–R22 —** secrets only via env / `.env`; `engine/sources/scraper.py` logic
+      unchanged; the adoption gate and P7 gate hold; style; conservation, C1 and C2;
+      exit codes 0/1/2 everywhere.
 
 ---
 
@@ -99,11 +103,11 @@ because each one silently corrupts data or invalidates model numbers.
 
 ## C. The browser-automation boundary (highest-stakes surface here)
 
-`src/scraper.py` launches Chrome against `~/Library/Application Support/Google/Chrome/Default`
+`engine/sources/scraper.py` launches Chrome against `~/Library/Application Support/Google/Chrome/Default`
 — Faig's **real** profile, with live sessions for every site he uses.
 
 - [ ] Confirm the profile path and whether a throwaway profile would work. **Report the risk;
-      do not change it** (P12: ask-before).
+      do not change it** (R18: ask-before).
 - [ ] Can a page the scraper visits be attacker-influenced? Match IDs come from the API, but
       a matchroom renders user-controlled content (nicknames, team names). Any
       `page.evaluate`, `inner_html`, or unsanitised selector interpolation?
@@ -162,7 +166,7 @@ Everything arriving from FACEIT or a demo file is untrusted, however friendly th
       `status` or `score` is a HIGH.
 - [ ] Transactions: `store_match` must stay ONE transaction (BEGIN IMMEDIATE … commit)
       covering the deletes, both inserts and the processed marker. Any new write path that
-      commits in pieces reopens the partial-match / re-insert window. It is P1.
+      commits in pieces reopens the partial-match / re-insert window. It is R1.
 - [ ] Connection lifecycle: `_conn()` opens a new connection per call and runs the
       migration check every time. Correctness first, performance second.
 - [ ] Migrations: every new column must appear in BOTH `_init_schema` and `_MIGRATIONS`
@@ -279,7 +283,7 @@ Flag anything here as `needs-domain-review` rather than asserting it wrong.
 
 ## K. Tests
 
-- [ ] Which of P1–P15 have **no** test at all? Name each. This is the most valuable output
+- [ ] Which of R1–R22 have **no** test at all? Name each. This is the most valuable output
       of this section.
 - [ ] Tests that assert nothing: a script that prints and exits 0 regardless.
       `test/test_local_demo.py` and `test/test_scraper.py` are inspection scripts named
@@ -300,9 +304,10 @@ Flag anything here as `needs-domain-review` rather than asserting it wrong.
 
 ## L. Config, dependencies, agent config, docs-vs-reality
 
-- [ ] `requirements.txt` vs `pyproject.toml`: which deps are in one and not the other?
-      `pyproject.toml`'s `[project.scripts]` points at `crosshair.main:main` — does that
-      module path exist? A broken console-script entry point is a finding.
+- [ ] `requirements-engine.txt` vs the lock vs `pyproject.toml`: does `pyproject.toml`
+      read its deps from the requirements file, does its `[project.scripts]` entry
+      (`engine.cli:main`) exist, and does package-data list every data file the engine
+      reads at runtime? A broken console-script entry point is a finding.
 - [ ] Unpinned ranges (`>=` with no upper bound) on `awpy`, `pandas`, `numpy`, `lightgbm`.
       `awpy` in particular is pre-1.0-stable in API terms; an unpinned major is a real risk
       for a parser this project depends on entirely.
@@ -316,11 +321,13 @@ Flag anything here as `needs-domain-review` rather than asserting it wrong.
       (`src/wp_model.py`, `--data-dir` flags) indicate an allowlist nobody prunes.
 - [ ] This skill's own files — does anything here instruct a write outside `docs/reviews/`?
 - [ ] **Docs vs reality**, contradiction only:
-      - Does every CLI invocation in `README.md` actually parse against `main.py`'s argparse?
+      - Does every CLI invocation in `README.md`, `CLAUDE.md` and `docs/` actually parse
+        against `engine/cli.py`'s `build_parser()`?
       - Does `README.md`'s project layout match the real tree?
       - Are stated numbers (match count, event count, AUC, DB size) presented as current
         when they are from an old reference run?
       - Does `CLAUDE.md` describe invariants the code violates? (Both directions are
         findings: doc wrong, or code wrong.)
-      - Does `PROMPT_faceit_api_downloader.md`'s spec match what `faceit_api.py` does?
+      - Do `docs/ENGINE_PLAN.md`, `docs/DATA_SOURCES.md` and `docs/ENGINE_OPS.md` match
+        what the code does?
       - Do documented setup steps work on a clean checkout?

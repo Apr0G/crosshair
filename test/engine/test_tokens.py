@@ -7,15 +7,15 @@ used; a dead player's token depends only on side / tier / alive.
 """
 
 import numpy as np
-import torch
 
-from _harness import check, section, summary
-from _fake_states import fake_arrays, finish, test_device
+from _harness import check, require, section, summary
+torch = require("torch", "needs the platform torch build (docs/ENGINE_ENV.md)")   # LOW-61
+from _fake_states import fake_arrays, finish, test_device  # noqa: E402
 
-from engine.data import dataset
-from engine.data.dataset import PLAYER_LAYOUT, SNAPSHOT_KEYS, UTIL_LAYOUT
-from engine.model import batching
-from engine.model.tokens import NumericEmbed, TokenEmbedder
+from engine.data import dataset  # noqa: E402
+from engine.data.dataset import PLAYER_LAYOUT, SNAPSHOT_KEYS, UTIL_LAYOUT  # noqa: E402
+from engine.model import batching  # noqa: E402
+from engine.model.tokens import NumericEmbed, TokenEmbedder  # noqa: E402
 
 DEV = test_device()
 print(f"device: {DEV}")

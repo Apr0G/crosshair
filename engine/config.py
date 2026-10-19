@@ -7,7 +7,8 @@ Load and validate `engine/config.yaml` (P0.4).
     config.config_hash(cfg)              # sha256 hex of the canonical YAML
 
 Every key is required and unknown keys are rejected, so a typo in the YAML fails at
-load time instead of silently falling back to a default. Types come from the dataclass
+load time instead of silently falling back to a default; a key given twice in one
+mapping is rejected too (LOW-06: YAML would otherwise keep the last one silently). Types come from the dataclass
 annotations; ranges and cross-field rules are in the "validation" section below.
 """
 import dataclasses
@@ -341,6 +342,8 @@ _UNIT_INTERVAL = (
 )
 # The only fields allowed below zero: floors on a W change, in [-1, 0].
 _NEGATIVE_OK = ("sanity.smoke_floor", "sanity.unflash_floor")
+# Integers for which 0 is a legitimate value (LOW-05); every other integer must be >= 1.
+_ZERO_OK = ("qa.max_outliers", "train.seed")
 # Floats that must be strictly positive (a zero here would divide or never fire).
 _STRICTLY_POSITIVE = (
     "clock.round_time_s", "clock.bomb_timer_s",
@@ -371,8 +374,8 @@ def _check_generic(cfg: Config) -> None:
             if any(x < 0 for x in v):
                 raise ConfigError(f"{path}: values must be >= 0, got {list(v)}")
             continue
-        if isinstance(v, int) and v < 1:
-            raise ConfigError(f"{path}: must be a positive integer, got {v}")
+        if isinstance(v, int) and v < (0 if path in _ZERO_OK else 1):
+            raise ConfigError(f"{path}: must be {'>= 0' if path in _ZERO_OK else 'a positive integer'}, got {v}")
         if path in _NEGATIVE_OK:
             if not -1.0 <= v <= 0.0:
                 raise ConfigError(f"{path}: must be in [-1, 0], got {v}")
@@ -422,13 +425,37 @@ def validate(cfg: Config) -> Config:
     for path, v in _leaves(cfg.qa.max_null_pct, "qa.max_null_pct."):
         if v is not None and v > 100:
             raise ConfigError(f"{path}: a percentage, must be <= 100, got {v}")
-    if not cfg.calib.martingale_horizons_s:
+    hz = cfg.calib.martingale_horizons_s
+    if not hz:
         raise ConfigError("calib.martingale_horizons_s: must not be empty")
+    if any(h <= 0 for h in hz) or len(set(hz)) != len(hz):       # LOW-05: a 0 s look-ahead is vacuous
+        raise ConfigError(f"calib.martingale_horizons_s: need distinct values > 0, got {list(hz)}")
     _check_budgets(cfg)
     return cfg
 
 
 # ── public API ────────────────────────────────────────────────────────────────
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a mapping holding the same key twice (LOW-06)."""
+
+
+def _construct_unique_mapping(loader: _UniqueKeyLoader, node, deep: bool = False):
+    seen: set = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            dup = key in seen
+        except TypeError:                             # unhashable key: SafeLoader reports it below
+            continue
+        if dup:
+            raise yaml.constructor.ConstructorError(None, None, f"duplicate key {key!r}", key_node.start_mark)
+        seen.add(key)
+    return loader.construct_mapping(node, deep=deep)
+
+
+_UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+
 
 def from_dict(data: dict) -> Config:
     """Build and validate a Config from an already-parsed YAML mapping."""
@@ -440,8 +467,8 @@ def load(path: Path | str | None = None) -> Config:
     p = Path(path) if path is not None else DEFAULT_PATH
     with open(p, encoding="utf-8") as fh:
         try:
-            data = yaml.safe_load(fh)
-        except yaml.YAMLError as exc:                 # a tab indent, an unclosed bracket: exit 2, not 1
+            data = yaml.load(fh, Loader=_UniqueKeyLoader)    # safe_load + duplicate-key refusal
+        except yaml.YAMLError as exc:                 # a tab indent, an unclosed bracket, a duplicate key: exit 2, not 1
             mark = getattr(exc, "problem_mark", None)
             where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
             raise ConfigError(f"{p.name}: YAML syntax error{where}: {getattr(exc, 'problem', None) or exc}") from None

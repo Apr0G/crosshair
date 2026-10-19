@@ -2,6 +2,7 @@
 The one test harness for the engine suite (Amendment 1). Stdlib only.
 
     from _harness import check, skip, close, section, summary
+    require("torch", "the model tests need the platform torch build")   # exit 2 if absent
 
 Importing it also puts the repo root on sys.path (so tests can `import engine`) and
 switches stdout/stderr to UTF-8 with errors="replace" (Windows consoles default to a
@@ -53,6 +54,18 @@ def skip(desc: str, why: str) -> None:
 
 def close(a, b, tol: float = 1e-6) -> bool:
     return a is not None and b is not None and abs(a - b) <= tol
+
+
+def require(module: str, why: str):
+    """Import `module` and return it; on ImportError print why and exit 2 (a missing
+    prerequisite, not an error). Call it before importing anything that needs the
+    module, e.g. torch or faiss when the platform build is absent (LOW-61)."""
+    import importlib
+    try:
+        return importlib.import_module(module)
+    except ImportError as exc:
+        print(f"prerequisite missing: cannot import {module} ({type(exc).__name__}: {exc}); {why}")
+        sys.exit(2)
 
 
 def section(title: str) -> None:

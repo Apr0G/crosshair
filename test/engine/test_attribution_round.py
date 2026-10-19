@@ -18,7 +18,7 @@ import polars as pl
 
 from _harness import check, close, section, summary
 from _cf_states import RuleStub
-from _attr_states import make_round, round_hazard, round_win, snapshot_at
+from _attr_states import FREEZE_END, TERMINAL, make_round, round_hazard, round_win, snapshot_at
 from _stubs import StubPredictor
 
 from engine import config
@@ -68,12 +68,22 @@ for label, pred, cfg, tol in (("RuleStub/exact", RuleStub(round_win), CFG, 1e-9)
     check(f"[{label}] telescoping exact", abs(ra.stats["telescoping_residual"]) <= 1e-12)
 ra = runs["Stub+hazard/exact"]
 check("terminal W pinned to the round label (CT win -> 1.0)", ra.w_end == 1.0 and ra.stats["terminal_pinned"])
+w_fe = round_win(snapshot_at(FREEZE_END))            # built independently of `snaps` (LOW-69)
+check("w_start == W(freeze_end snapshot), computed independently, for every run",
+      all(r.w_start == w_fe for r in runs.values()), f"{[r.w_start for r in runs.values()]} vs {w_fe}")
+shuffled = snaps[1::2] + snaps[0::2]
+ra_sh = engine.attribute_round(shuffled, actions, windows, StubPredictor(win=round_win, hazard=round_hazard), CFG)
+check("w_start is the freeze_end snapshot even when the input list does not start with it",
+      ra_sh.w_start == w_fe and shuffled[0].meta.tick != FREEZE_END)
+check("Σ V_raw + clock_ct − clock_t == 1.0 − W(freeze_end) with both ends pinned independently",
+      abs(math.fsum([sa.V_raw for sa in ra.actions] + [ra.clock_ct, -ra.clock_t]) - (1.0 - w_fe)) <= 1e-9)
 check("sampled run used sampled Shapley for the 3-member window", runs["Stub+hazard/sampled"].stats["sampled_windows"] == ["w5000"])
 check("no failed windows", not ra.stats["failed_windows"])
 ra_np = engine.attribute_round(snaps, actions, windows, StubPredictor(win=round_win, hazard=round_hazard), CFG,
                                pin_terminal=False)
 check("pin_terminal=False keeps the model's terminal W and still conserves",
-      ra_np.w_end == round_win(snaps[-1]) and abs(ra_np.conservation_residual) <= 1e-9)
+      ra_np.w_end == round_win(snaps[-1]) == round_win(snapshot_at(TERMINAL))
+      and abs(ra_np.conservation_residual) <= 1e-9)
 
 # ── two kills on one tick, decoy ──────────────────────────────────────────────
 

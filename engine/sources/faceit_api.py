@@ -30,15 +30,16 @@ DOWNLOADS_URL = "https://open.faceit.com/download/v2/demos/download"
 
 # ── Match discovery (same criteria as the Playwright path) ────────────────────
 
-def get_match_demo_urls(match_id: str) -> list[str]:
-    """Demo resource URL(s) for a match via GET /matches/{id}. [] if none.
+def get_match_details(match_id: str) -> dict | None:
+    """GET /matches/{id} once (LOW-09: demo URLs and the level filter both read this
+    payload). None when the lookup fails.
 
-    Raises on auth-class failures: returning [] for those would be identical to
+    Raises on auth-class failures: returning None for those would be identical to
     "this match genuinely has no demo", so a revoked key would look like a clean run
     over a player pool with nothing to download.
     """
     try:
-        data = scraper._api_get(f"/matches/{match_id}")
+        return scraper._api_get(f"/matches/{match_id}")
     except scraper.RateLimited:
         raise                                   # MED-24: a throttled run stops, it does not look empty
     except requests.HTTPError as e:
@@ -49,41 +50,40 @@ def get_match_demo_urls(match_id: str) -> list[str]:
                 f"the API key is invalid or lacks access. Stopping."
             ) from e
         print(f"    match details failed for {match_id}: {e}")
-        return []
+        return None
     except Exception as e:
         print(f"    match details failed for {match_id}: {e}")
-        return []
-    urls = data.get("demo_url") or []
+        return None
+
+
+def demo_urls_from(data: dict | None) -> list[str]:
+    """Demo resource URL(s) of a /matches/{id} payload. [] if none."""
+    urls = (data or {}).get("demo_url") or []
     if isinstance(urls, str):
         urls = [urls]
     return urls
 
 
-def get_match_min_level(match_id: str) -> int | None:
-    """Lowest FACEIT skill level among the match's ten players, or None.
+def get_match_demo_urls(match_id: str) -> list[str]:
+    """Demo resource URL(s) for a match via GET /matches/{id}. [] if none; auth-class
+    failures raise (see get_match_details)."""
+    return demo_urls_from(get_match_details(match_id))
 
-    Reads GET /matches/{id} -> teams.<faction>.roster[].game_skill_level (field name
-    checked against the FACEIT Data API v4 swagger `Roster` definition, 2026-10-19).
-    None when the lookup fails or the payload does not carry exactly ten players each
-    with an integer level: an unknown level never qualifies for a level filter.
-    Auth-class failures raise, as in get_match_demo_urls.
+
+def get_match_min_level(match_id: str) -> int | None:
+    """Lowest FACEIT skill level among the match's ten players, or None; auth-class
+    failures raise (see get_match_details). Reads min_level_from on one GET."""
+    return min_level_from(get_match_details(match_id))
+
+
+def min_level_from(data: dict | None) -> int | None:
+    """Lowest FACEIT skill level among the ten players of a /matches/{id} payload.
+
+    Reads teams.<faction>.roster[].game_skill_level (field name checked against the
+    FACEIT Data API v4 swagger `Roster` definition, 2026-10-19). None when the payload
+    is missing or does not carry exactly ten players each with an integer level: an
+    unknown level never qualifies for a level filter.
     """
-    try:
-        data = scraper._api_get(f"/matches/{match_id}")
-    except scraper.RateLimited:
-        raise
-    except requests.HTTPError as e:
-        status = e.response.status_code if e.response is not None else None
-        if status in (401, 403):
-            raise PermissionError(
-                f"FACEIT Data API returned {status} for /matches/{match_id} — "
-                f"the API key is invalid or lacks access. Stopping."
-            ) from e
-        print(f"    match details failed for {match_id}: {e}")
-        return None
-    except Exception as e:
-        print(f"    match details failed for {match_id}: {e}")
-        return None
     levels = []
     for faction in ((data or {}).get("teams") or {}).values():
         for player in (faction or {}).get("roster") or []:
@@ -136,14 +136,15 @@ def iter_unprocessed_demos(
                 continue
             seen.add(mid)
 
+            print(f"    getting match details for {mid} ...")
+            details = get_match_details(mid)            # one GET for both (LOW-09)
             if min_level is not None:
-                lowest = get_match_min_level(mid)
+                lowest = min_level_from(details)
                 if lowest is None or lowest < min_level:
                     print(f"    skipping {mid} (lowest skill level {lowest}, need {min_level})")
                     continue
 
-            print(f"    getting demo URLs for {mid} ...")
-            demo_urls = get_match_demo_urls(mid)
+            demo_urls = demo_urls_from(details)
             if not demo_urls:
                 print(f"    no demo for {mid}, skipping")
                 continue

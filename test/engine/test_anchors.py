@@ -63,6 +63,8 @@ rows.append(act("m3", 2, tick=100, V_direct=0.95, alive_ct_pre=4, alive_t_pre=5,
                 equip_t_pre=4000.0))                                                 # not a 5v5
 rows.append(act("m3", 3, tick=100, V_direct=0.95, alive_ct_pre=5, alive_t_pre=5))   # equipment unknown
 rows.append(act("m3", 4, type_="peek", tick=50, V_direct=0.95, **BAL))              # not a kill
+rows.append(act("m3", 5, tick=100, V_direct=0.95, alive_t_pre=5, equip_ct_pre=4000.0,
+                equip_t_pre=4000.0))                                                 # alive_ct unknown (LOW-39)
 ok_frame = frame(rows)
 r = an.opening_kill_band(ok_frame)
 check("value = mean |V_direct| of balanced first kills (0.18)", close(r["value"], 0.18, 1e-12), f"{r.get('value')}")
@@ -70,6 +72,8 @@ check("n = 20 balanced opening kills", r["n"] == 20, f"{r['n']}")
 check("in band [0.12, 0.30]", r["status"] == an.IN_BAND)
 check("excluded: unbalanced + not 5v5 = 2; unknown equipment = 1",
       r["n_excluded"] == 2 and r["n_unknown_equipment"] == 1, f"{r['n_excluded']} {r['n_unknown_equipment']}")
+check("unknown alive count skipped and counted, never taken for 5v5 (LOW-39)",
+      r["n_unknown_alive"] == 1, f"{r.get('n_unknown_alive')}")
 check("by map: mirage 0.20, inferno 0.16",
       close(r["by_map"]["de_mirage@unknown"]["mean"], 0.20) and close(r["by_map"]["de_inferno@unknown"]["mean"], 0.16))
 check("first kill picked by tick, not by row order",
@@ -183,6 +187,20 @@ with tempfile.TemporaryDirectory() as td:
           pr["n"] == 6 and close(pr["value"], 1.0) and pr["status"] == an.IN_BAND, f"{pr.get('value')} n={pr['n']}")
     check("fewer than 50 matches noted", pr["note"] is not None and "50" in pr["note"])
     check("disagreements listed (<= 10)", 0 < len(pr["disagreements"]) <= an.TOP_DISAGREEMENTS)
+    # LOW-59: a blank player_name falls back to the report's p_<hex> label (MED-36), never the SteamID64
+    from engine.report.writer import player_label
+    blank = Path(td) / "blank.csv"
+    b_lines = [lines[0]]
+    for i, sid in enumerate(sids):
+        b_lines.append(f"pm1,de_mirage,{sid},{'' if i == 2 else f'player{i}'},{0.6 + 0.1 * i:.2f}")
+    blank.write_text("\n".join(b_lines), encoding="utf-8")
+    pb = an.player_rating_correlation(pr_frame, blank)
+    label = player_label(player_id_hash(sids[2]))
+    check("blank player_name -> p_<hex> label, no SteamID64 in the result (LOW-59)",
+          label.startswith("p_") and label in {d["player"] for d in pb["disagreements"]}
+          and str(sids[2]) not in json.dumps(pb), label)
+    check("the result keeps the anchor's own name (not a player's)",
+          pr["name"] == "player_rating" and pb["name"] == "player_rating", f"{pr['name']!r} / {pb['name']!r}")
     flipped = Path(td) / "flipped.csv"
     flipped.write_text("\n".join([lines[0]] + [f"pm1,de_mirage,{sid},p{i},{1.6 - 0.1 * i:.2f}"
                                                 for i, sid in enumerate(sids)]), encoding="utf-8")

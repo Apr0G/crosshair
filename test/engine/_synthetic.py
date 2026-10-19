@@ -3,6 +3,7 @@ Synthetic awpy-3-shaped `RawTables` for engine tests (P3.9). Stdlib + numpy + po
 
     from _synthetic import make_raw_tables, STORIES, STORY_FACTS, PLAYERS, scale_tick
     raw = make_raw_tables("flash", tick_rate=64)
+    raw = make_raw_tables("base", spotted_by=False)      # ticks.spotted_by all null, as the parser emits
 
 The 2v2 skeleton every story shares (ticks written for 128 tick; at another tick rate
 every tick is scaled by tick_rate/128, so a 64-tick story has half the ticks and the
@@ -466,12 +467,16 @@ def _footsteps(s: _Story, ticks: pl.DataFrame) -> pl.DataFrame:
 
 # ── public ────────────────────────────────────────────────────────────────────
 
-def make_raw_tables(story: str = "base", tick_rate: int = 128) -> RawTables:
-    """The story as awpy-3-shaped RawTables at `tick_rate`. Passes validate(strict=True)."""
+def make_raw_tables(story: str = "base", tick_rate: int = 128, *, spotted_by: bool = True) -> RawTables:
+    """The story as awpy-3-shaped RawTables at `tick_rate`. Passes validate(strict=True).
+    `spotted_by=False`: `ticks.spotted_by` is null on every row, which is what the awpy 3
+    parser emits (the field is not obtainable; LOW-63)."""
     if story not in STORIES:
         raise ValueError(f"unknown story {story!r}; one of {STORIES}")
     s     = _describe(story, tick_rate)
     ticks = _ticks(s)
+    if not spotted_by:
+        ticks = ticks.with_columns(pl.lit(None, dtype=TABLE_SCHEMAS["ticks"]["spotted_by"]).alias("spotted_by"))
     rounds = _frame([dict(round_num=r["round_num"], start_tick=r["start"], freeze_end_tick=r["freeze_end"],
                           end_tick=r["end"], official_end_tick=r["official_end"], winner_side=r["winner"],
                           end_reason=r["reason"], bomb_planted=r["bomb_planted"],

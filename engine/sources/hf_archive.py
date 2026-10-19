@@ -210,13 +210,16 @@ def download_waves(files: Iterable[HfFile], dest_dir: Path, repo: str, *,
 # ── source interface ──────────────────────────────────────────────────────────
 
 def match_id_for(path: str) -> str:
-    """`hf-<path without extension>` with every unsafe run replaced by '-'."""
+    """`hf-<path without extension>-<8 hex>`, every unsafe run replaced by '-'. The
+    suffix is the sha1 of the full archive path (LOW-11): 'a/b.dem' and 'a-b.dem', or
+    'x.dem' and 'x.dem.zst', would otherwise share an id and the second be skipped."""
     low = path
     for ext in DEMO_EXTS[::-1]:
         if low.lower().endswith(ext):
             low = low[: -len(ext)]
             break
-    return "hf-" + _ID_RE.sub("-", low.replace("/", "-")).strip("-")
+    digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:8]
+    return "hf-" + _ID_RE.sub("-", low.replace("/", "-")).strip("-") + f"-{digest}"
 
 
 _EXPECTED: dict[str, tuple[str | None, str]] = {}      # url -> (sha256, stored path)

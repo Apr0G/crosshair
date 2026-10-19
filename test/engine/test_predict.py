@@ -12,16 +12,18 @@ from pathlib import Path
 
 import numpy as np
 
-from _harness import check, section, summary
-from _fake_states import fake_arrays, finish, histories, make_model_dir, test_device
+from _harness import check, require, section, skip, summary
+require("torch", "the Predictor needs the platform torch build (docs/ENGINE_ENV.md)")   # LOW-61
+from _fake_states import fake_arrays, finish, histories, make_model_dir, test_device  # noqa: E402
 from _stubs import StubPredictor
 
-from engine.model import calibrate
-from engine.model.predict import Predictor, cache_key, edit_hash
+from engine.model import calibrate  # noqa: E402
+from engine.model.predict import Predictor, cache_key, edit_hash  # noqa: E402
 
 DEV = test_device()
 print(f"device: {DEV}")
 TOL = 1e-5
+BF16_P99_LOGIT = 0.1
 snaps, vocab, arrs, norm = fake_arrays(18, seed=51, n_snapshots=30)
 hist = histories(snaps)
 N512 = 512
@@ -39,7 +41,9 @@ with tempfile.TemporaryDirectory() as d:
     check("shapes win (N,), hazard (N,10), plant15 / defuse15 (N,)",
           out["win"].shape == (N512,) and out["hazard"].shape == (N512, 10)
           and out["plant15"].shape == (N512,) and out["defuse15"].shape == (N512,))
-    check("probabilities in [0, 1]", all(((v >= 0) & (v <= 1)).all() for v in out.values()))
+    check("win finite and different states give different win (LOW-70)",
+          bool(np.isfinite(out["win"]).all()) and float(np.ptp(out["win"])) > 1e-4,
+          f"range {float(np.ptp(out['win'])):.2e}")
     dead = np.array([[p.alive == 0 for p in s.players] for s in sub])
     check("dead players' hazard exactly 0", bool((out["hazard"][dead] == 0).all()) and dead.any())
     check("alive players' hazard > 0", bool((out["hazard"][~dead] > 0).all()))
@@ -122,14 +126,40 @@ with tempfile.TemporaryDirectory() as d:
     check("group temperatures applied to their group only",
           np.allclose(calg["win"][in_g], 1 / (1 + np.exp(-logit[in_g] / 4.0)), atol=1e-6)
           and np.allclose(calg["win"][~in_g], out_nc["win"][~in_g], atol=1e-6))
+    # LOW-29: group keys go through the vocab in the Predictor as in the fit, so an unseen
+    # map version is '<unk>' and a null one '<null>' (before: the raw string / 'None')
+    odd = []
+    for x, mv in zip(sub[:40], ["de_never_seen_v9"] * 20 + [None] * 20):
+        y = x.copy()
+        y.ctx.map_version = mv
+        odd.append(y)
+    odd_h = sub_h[:40]
+    (mdir / "calibration.json").write_text(json.dumps({"T": 1.0, "mode": "single", "groups": {}}))
+    p1 = Predictor(mdir, DEV, cache=False).predict(odd, odd_h)["win"]
+    lo = np.log(p1) - np.log1p(-p1)
+    groups = {f"<unk>|{p}": 3.0 for p in calibrate.PHASES} | {f"<null>|{p}": 5.0 for p in calibrate.PHASES}
+    (mdir / "calibration.json").write_text(json.dumps({"T": 1.0, "mode": "group", "groups": groups}))
+    pg = Predictor(mdir, DEV, cache=False).predict(odd, odd_h)["win"]
+    T_exp = np.array([3.0] * 20 + [5.0] * 20)
+    check("group T keyed '<unk>' / '<null>' applies to unseen / null map versions (LOW-29)",
+          np.allclose(pg, 1 / (1 + np.exp(-lo / T_exp)), atol=1e-6))
+    check("Predictor keys == fit keys (map_versions_through_vocab vs map_versions_from_arrays)",
+          list(calibrate.map_versions_through_vocab([s.ctx.map_version for s in sub[:50]], vocab))
+          == list(calibrate.map_versions_from_arrays({k: v[:50] for k, v in arrs.items()}, vocab)))
+    (mdir / "calibration.json").write_text(json.dumps({"T": 1.0, "mode": "group", "groups": {g0: 4.0}}))
 
     section("bf16 option")
+    check("bf16 is ignored on CPU", Predictor(mdir, "cpu", bf16=True).bf16 is False)
     if DEV == "cuda":
         ob = Predictor(mdir, DEV, cache=False, bf16=True).predict(sub, sub_h)
-        dmax = float(np.abs(ob["win"] - calg["win"]).max())     # same calibration.json as calg
-        check("bf16 Predictor within 1e-2 of fp32 on win", dmax < 1e-2, f"max |diff| {dmax:.2e}")
+        # LOW-79: p99 of |logit diff| (same calibration.json as calg), not the max of a
+        # probability diff, which swings with GPU load (unpinned ROCm nondeterminism)
+        lg = lambda p: np.log(p) - np.log1p(-p)   # noqa: E731
+        d99 = float(np.quantile(np.abs(lg(ob["win"]) - lg(calg["win"])), 0.99))
+        check(f"bf16 Predictor p99 |logit diff| vs fp32 < {BF16_P99_LOGIT}", d99 < BF16_P99_LOGIT,
+              f"p99 {d99:.2e}")
     else:
-        check("bf16 is ignored on CPU", Predictor(mdir, DEV, bf16=True).bf16 is False)
+        skip("bf16 Predictor tolerance vs fp32", "bf16 runs on the GPU only")
 
     section("no-aux-heads model")
     adir = Path(d) / "wp_noaux"

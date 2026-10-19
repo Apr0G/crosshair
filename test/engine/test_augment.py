@@ -8,15 +8,14 @@ at eval, defaults are on in training, and a seeded generator replays exactly.
 """
 import dataclasses
 
-import torch
+from _harness import check, require, section, summary
+torch = require("torch", "needs the platform torch build (docs/ENGINE_ENV.md)")   # LOW-61
+from _fake_states import fake_arrays, finish, test_device  # noqa: E402
 
-from _harness import check, section, summary
-from _fake_states import fake_arrays, finish, test_device
-
-from engine import config
-from engine.data.dataset import PAIR_CHANNELS, PLAYER_LAYOUT, SNAPSHOT_KEYS
-from engine.model import augment as aug
-from engine.model import batching
+from engine import config  # noqa: E402
+from engine.data.dataset import PAIR_CHANNELS, PLAYER_LAYOUT, SNAPSHOT_KEYS  # noqa: E402
+from engine.model import augment as aug  # noqa: E402
+from engine.model import batching  # noqa: E402
 
 DEV = test_device()
 print(f"device: {DEV}")

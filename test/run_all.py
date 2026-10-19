@@ -10,8 +10,10 @@ own process with the project venv's interpreter (`.venv\\Scripts\\python.exe`, o
 A run that dies with an uncaught exception (traceback on stderr) or any other exit
 code is reported as ERROR, separately from a test that ran and failed a check.
 
-A demo path, if given, is appended to every test's argv; tests that do not take one
-ignore extra arguments.
+A demo path, if given, is resolved against the caller's directory and appended to
+every test's argv; tests that do not take one ignore extra arguments. When the caller
+has no `CROSSHAIR_ENGINE_DB`, each test gets a fresh temp DB through it (LOW-42), so a
+test that forgets to set its own can never open `data/engine/engine.db`.
 
 `--suite engine` and `--suite all` are the same today (Amendment 1: the engine suite is
 the only suite); the flag exists so later suites can be added without changing callers.
@@ -19,8 +21,10 @@ the only suite); the flag exists so later suites can be added without changing c
 Not run here: test_scraper.py (opens a real Chrome window).
 """
 import argparse
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -62,19 +66,23 @@ def classify(returncode: int, stderr: str) -> str:
 def run_one(python: str, script: Path, demo: str | None) -> tuple[str, str, float, list[str], str]:
     cmd = [python, str(script)] + ([demo] if demo else [])
     t0 = time.time()
-    try:
-        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=TIMEOUT_S)
-        out, err, rc = (proc.stdout or ""), (proc.stderr or ""), proc.returncode
-    except subprocess.TimeoutExpired:
-        out, err, rc = "", f"timed out after {TIMEOUT_S}s", -1
+    with tempfile.TemporaryDirectory(prefix="ch_run_all_", ignore_cleanup_errors=True) as tmp:
+        env = dict(os.environ)
+        env.setdefault("CROSSHAIR_ENGINE_DB", str(Path(tmp) / "engine.db"))    # LOW-42
+        try:
+            proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env=env,
+                                  encoding="utf-8", errors="replace", timeout=TIMEOUT_S)
+            out, err, rc = (proc.stdout or ""), (proc.stderr or ""), proc.returncode
+        except subprocess.TimeoutExpired:
+            out, err, rc = "", f"timed out after {TIMEOUT_S}s", -1
     dt = time.time() - t0
     lines  = out.strip().splitlines()
     status = classify(rc, err)
     if status == "ERROR":
         tally = (err.strip().splitlines() or [f"exit code {rc}"])[-1]
-    elif status == "SKIP":       # the reason: last line that is not a rule or section banner
-        tally = next((l.strip() for l in reversed(lines) if l.strip() and not l.strip().startswith("─")), "")
+    elif status == "SKIP":       # the reason: a harness '(skipped: ...)' line, else the last non-banner line
+        tally = (next((l.strip() for l in lines if "(skipped:" in l), "")
+                 or next((l.strip() for l in reversed(lines) if l.strip() and not l.strip().startswith("─")), ""))
     else:
         tally = next((l.strip() for l in reversed(lines) if "passed" in l), "")
     return status, tally, dt, lines, err
@@ -88,12 +96,13 @@ def main() -> int:
 
     python  = interpreter()
     scripts = discover(args.suite)
+    demo    = str(Path(args.demo).resolve()) if args.demo else None      # children run with cwd=ROOT (LOW-42)
     print(f"  interpreter: {python}")
     print(f"  suite: {args.suite}  ({len(scripts)} test scripts)\n")
 
     results = []
     for script in scripts:
-        status, tally, dt, lines, err = run_one(python, script, args.demo)
+        status, tally, dt, lines, err = run_one(python, script, demo)
         results.append((script.name, status, dt))
         mark = PASS_MARK if status == "PASS" else FAIL_MARK if status in ("FAIL", "ERROR") else " "
         print(f"  {mark} {status:<5} {script.name:<30} {tally}  ({dt:.1f}s)", flush=True)

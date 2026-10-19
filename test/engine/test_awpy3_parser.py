@@ -191,8 +191,8 @@ def check_rawtables(tables: dict, meta: dict, label: str) -> None:
     try:
         from engine.parse.schema import RawTables
         raw = RawTables.from_parsed(tables, meta)
-    except (ImportError, AttributeError, NotImplementedError) as exc:
-        skip(f"RawTables.from_parsed accepts the {label} output", f"schema.py not ready: {exc}")
+    except ImportError as exc:          # only a missing module skips; an API error fails (LOW-67)
+        skip(f"RawTables.from_parsed accepts the {label} output", f"schema.py not importable: {exc}")
         return
     problems = raw.validate(strict=False)
     check(f"RawTables.from_parsed + validate() clean ({label})", not problems, "; ".join(problems[:5]))
@@ -350,6 +350,86 @@ def test_fake(tmp: Path) -> None:
     check("bare: demo_sha256 None without a file", mb["demo_sha256"] is None)
 
 
+def test_low_items(tmp: Path) -> None:
+    section("LOW-14: a won round with no roster makes later scores unknown")
+    nor = FakeDemo()
+    nor_orig = nor.snapshots
+    nor.snapshots = lambda **kw: nor_orig(**kw).with_columns(
+        pl.when(pl.col("tick") < 700).then(None).otherwise(pl.col("side")).alias("side"))
+    r = ap.parse(tmp / "x.dem", demo=nor)[0]["rounds"]
+    check("round 1 roster missing: round 2 scores are None, not 0-0",
+          r["ct_score_before"].to_list() == [None, None] and r["t_score_before"].to_list() == [None, None],
+          f"ct {r['ct_score_before'].to_list()} t {r['t_score_before'].to_list()}")
+    rr = pl.DataFrame({"round_num": [1, 2, 3], "winner_side": ["ct", "ct", "t"], "is_knife": [False] * 3})
+    ro = pl.DataFrame({"round_num": [1, 3], "ct": [[A, B], [A, B]], "t": [[C, D], [C, D]]},
+                      schema={"round_num": pl.Int32, "ct": pl.List(pl.UInt64), "t": pl.List(pl.UInt64)})
+    ct_b, t_b = ap._scores(rr, ro)
+    check("middle round roster missing: every later score is None",
+          ct_b == [0, None, None] and t_b == [0, None, None], f"ct {ct_b} t {t_b}")
+    rr_k = rr.with_columns(pl.Series("is_knife", [False, True, False]))
+    ct_k, t_k = ap._scores(rr_k, ro)
+    check("a rosterless knife round scores nothing, so later scores stay known",
+          ct_k == [0, None, 1] and t_k == [0, None, 0], f"ct {ct_k} t {t_k}")
+
+    section("LOW-15: double flash, each blind links to its own flash")
+    dbl = FakeDemo()
+    extra = [{"tick": t, "thrower_steamid": D, "thrower_name": NAMES[D], "thrower_side": "x",
+              "type": "flashbang", "entity_id": 14, "entity_serial": 1, "x": float(t), "y": 14.0, "z": 5.0}
+             for t in range(390, 411)]           # thrown after flash 1 (380), detonates after it (410)
+    dbl.grenades = pl.concat([dbl.grenades, pl.DataFrame(extra, schema=dbl.grenades.schema)])
+    dbl.blinds = pl.concat([dbl.blinds, pl.DataFrame(
+        {"tick": [410], "attacker_steamid": [D], "victim_steamid": [B], "duration": [0.5]},
+        schema=dbl.blinds.schema)])
+    tb = ap.parse(tmp / "x.dem", demo=dbl)[0]
+    fl = tb["grenades"].filter(pl.col("type") == "flash").sort("throw_tick")
+    id1 = fl.filter(pl.col("throw_tick") == 380)["entity_id"].item()
+    id2 = fl.filter(pl.col("throw_tick") == 390)["entity_id"].item()
+    fx = tb["flashes"].sort(["detonate_tick", "player_steamid"])
+    check("blinds at 395 link to flash 1 (detonated 395), not the later throw",
+          fx.filter(pl.col("detonate_tick") == 395)["entity_id"].to_list() == [id1, id1],
+          f"{fx.select('detonate_tick', 'entity_id').to_dicts()} id1={id1} id2={id2}")
+    check("blind at 410 links to flash 2 (detonated 410)",
+          fx.filter(pl.col("detonate_tick") == 410)["entity_id"].to_list() == [id2])
+
+    section("LOW-16: segment gap and defuse tolerance scale with the tick rate")
+    def _holed(rate: int) -> int:
+        d = FakeDemo()
+        d.header = {**FakeDemo.header, "playback_ticks": rate * 2400}
+        hole = [{"tick": t, "thrower_steamid": A, "thrower_name": NAMES[A], "thrower_side": "x",
+                 "type": "hegrenade", "entity_id": 20, "entity_serial": 1, "x": float(t), "y": 20.0, "z": 5.0}
+                for t in list(range(250, 261)) + list(range(267, 281))]      # a 7-tick hole
+        d.grenades = pl.concat([d.grenades, pl.DataFrame(hole, schema=d.grenades.schema)])
+        return ap.parse(tmp / "x.dem", demo=d)[0]["grenades"].height
+    n128, n64 = _holed(128), _holed(64)
+    check("a 7-tick hole is one grenade at 128 tick (gap 8) and two at 64 tick (gap 4)",
+          (n128, n64) == (7, 8), f"128: {n128}, 64: {n64}")
+    snap = pl.DataFrame({"tick": list(range(10, 31)), "round_num": [1] * 21, "steamid": [A] * 21,
+                         "is_defusing": [10 <= t < 20 for t in range(10, 31)], "has_defuser": [True] * 21,
+                         "x": [0.0] * 21, "y": [0.0] * 21, "z": [0.0] * 21},
+                        schema_overrides={"steamid": pl.UInt64, "tick": pl.Int64, "round_num": pl.Int32})
+    comp = pl.DataFrame({"round_num": [1], "tick": [25]}, schema={"round_num": pl.Int32, "tick": pl.Int64})
+    try:
+        ab128 = ap._defuse_events(snap, comp, 128).filter(pl.col("event") == "defuse_abort").height
+        ab256 = ap._defuse_events(snap, comp, 256).filter(pl.col("event") == "defuse_abort").height
+        check("complete 6 ticks after the falling edge: abort at 128 tick (tol 4), none at 256 (tol 8)",
+              (ab128, ab256) == (1, 0), f"128: {ab128}, 256: {ab256}")
+    except TypeError as exc:
+        check("complete 6 ticks after the falling edge: abort at 128 tick (tol 4), none at 256 (tol 8)",
+              False, f"{exc}")
+
+    section("LOW-17: NaN / inf playback timing")
+    check("NaN playback_time -> (None, None), no exception",
+          ap._tick_rate_from_header({"playback_ticks": TR * 2400, "playback_time": float("nan")}) == (None, None))
+    check("inf playback_ticks -> (None, None), no exception",
+          ap._tick_rate_from_header({"playback_ticks": float("inf"), "playback_time": 2400.0}) == (None, None))
+    nan_demo = FakeDemo()
+    nan_demo.header = {**FakeDemo.header, "playback_time": float("nan")}
+    info = ap.header_info(tmp / "x.dem", demo=nan_demo)
+    check("header_info with NaN timing: tick_rate and duration unknown, quarantined",
+          info["tick_rate"] is None and info["duration_s"] is None
+          and ap.quarantine_check(info) == "tick_rate_not_128")
+
+
 def test_quarantine(tmp: Path) -> None:
     section("quarantine_check")
     good = {"map": "de_mirage", "tick_rate": 128, "tick_rate_raw": 127.99, "n_rounds": 21,
@@ -406,6 +486,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         test_fake(tmp)
+        test_low_items(tmp)
         test_quarantine(tmp)
     if len(sys.argv) > 1:
         test_real(Path(sys.argv[1]))
