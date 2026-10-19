@@ -292,12 +292,22 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg    = config.load()
     device = train.pick_device(a.cpu)
-    model, vocab, _, _, ckpt = checkpoints.load_model_dir(a.model_dir, device)
-    val    = train.only_tier(dataset.read_shards(a.val), "pro")
-    test   = train.only_tier(dataset.read_shards(a.test), "pro")
+    try:
+        model, vocab, _, _, ckpt = checkpoints.load_model_dir(a.model_dir, device)
+        for split in (a.val, a.test):                   # the model's vocab must be the shards' vocab (MED-18)
+            dataset.check_artifacts(split, Path(a.model_dir) / "vocab.json", Path(a.model_dir) / "norm.json")
+        val    = train.only_tier(dataset.read_shards(a.val), "pro")
+        test   = train.only_tier(dataset.read_shards(a.test), "pro")
+        for what, arr in (("--val", val), ("--test", test)):
+            if dataset.n_labelled(arr) == 0:            # before anything is fitted or written (MED-19)
+                raise ValueError(f"{what} has no labelled pro rows; nothing to calibrate on")
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"calibrate: {exc}", file=sys.stderr)
+        return 2
     lv     = train.predict_logits(model, val, device)["win"]
     cal    = fit_calibration(lv, val["y_win"], map_versions_from_arrays(val, vocab), phases_from_arrays(val),
                              n_bins=cfg.calib.n_bins, min_group_n=cfg.calib.min_bin_n)
+    cal["checkpoint"], cal["state_hash"] = ckpt.name, checkpoints.state_hash(model.state_dict())   # MED-20
     save_calibration(a.model_dir, cal)
     res = train.evaluate(model, test, device, cfg=cfg, calibration=cal, vocab=vocab)
     name = Path(a.model_dir).name

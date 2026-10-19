@@ -324,6 +324,10 @@ def fit(cfg, train: dict, val: dict, out_dir: Path, *, vocab: Vocab, norm: NormS
     if tiers:
         train, val = only_tier(train, *tiers), only_tier(val, *tiers)
     val_pro = only_tier(val, "pro") if (val["tier"] == "pro").any() else val
+    for what, arr in (("train", train), ("val", val_pro)):
+        if dataset.n_labelled(arr) == 0:                   # fail now, not after the first epoch (MED-19)
+            raise ValueError(f"{what} split has no labelled rows" + (f" for tiers {tiers}" if tiers else "")
+                             + "; check the split name and the tier filter")
     log = _Logger(out_dir, quiet)
 
     set_seed(tc.seed)
@@ -506,7 +510,16 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     cfg = engine_config.load()
     out = Path(a.out) if a.out else checkpoints.next_version_dir(paths.MODELS_DIR, "wp_v")
-    s = fit(cfg, dataset.read_shards(a.train), dataset.read_shards(a.val), out,
+    try:
+        dataset.check_artifacts(a.train, a.vocab, a.norm)
+        tr, va = dataset.read_shards(a.train), dataset.read_shards(a.val)
+        for what, arr in (("--train", tr), ("--val", va)):
+            if dataset.n_labelled(arr, tuple(a.tiers) if a.tiers else ()) == 0:
+                raise ValueError(f"{what} split has no labelled rows" + (f" for --tiers {a.tiers}" if a.tiers else ""))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"train-wp: {exc}", file=sys.stderr)
+        return 2
+    s = fit(cfg, tr, va, out,
             vocab=Vocab.load(a.vocab), norm=NormStats.load(a.norm),
             temporal=not a.no_temporal, pairwise=not a.no_pairwise, aux_heads=not a.no_aux_heads,
             tiers=tuple(a.tiers) if a.tiers else None, device=pick_device(a.cpu),

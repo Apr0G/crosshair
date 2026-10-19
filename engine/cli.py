@@ -157,6 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="actions_valued parquet with h_pre, V, actor_side, tier, type and desc_* columns")
     p.add_argument("--split-file", type=Path, default=None, help="splits_vN.json (train / val by match_key)")
     p.add_argument("--out", type=Path, default=None, help="model directory (default data/engine/models/q_v<N+1>)")
+    p.add_argument("--wp-model", default=None, help="WP model whose encoder filled h_pre (recorded in the manifest)")
     p.add_argument("--cpu", action="store_true", help="train on the CPU")
 
     p = add("build-neighbours", "FAISS neighbour index over pro train actions (P9.3; calls neighbours.build_index)")
@@ -165,6 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--q-model", default=None, help="Q model name or directory (its descriptor vocab gives desc_ids)")
     p.add_argument("--split-file", type=Path, default=None, help="splits_vN.json: keep only train matches")
     p.add_argument("--tier", default="pro", help="keep rows of this tier (default pro)")
+    p.add_argument("--wp-model", default=None, help="WP model whose encoder filled h_pre (recorded in the manifest)")
     p.add_argument("--out", type=Path, default=None, help="index directory (default data/engine/models/neighbours_v<N+1>)")
 
     p = add("eval", "evaluation reports (delegates per target)")
@@ -294,6 +296,7 @@ def cmd_analyze(a, cfg, lg, run_id: str, timings: dict) -> int:
         if value_dirs:
             analyze.check_value_models(value_dirs, a.allow_unadopted, warnings, lg)
             vm = analyze.ValueModels.load(*value_dirs, device or "cpu")
+            analyze.warn_value_provenance(vm, model_versions.get("wp"), warnings, lg)
         if hook:                                   # after the model gates, before anything is written
             write_db, hook_warnings = _test_hook_guard(a, lg, write_db)
             warnings = hook_warnings + warnings
@@ -523,7 +526,7 @@ def cmd_train_q(a, cfg, lg, run_id: str, timings: dict) -> int:
     t0 = time.perf_counter()
     try:
         _q, _b, metrics = q_model.train_q(frame, h, vocab, cfg, split_fn, "cpu" if a.cpu else _device(),
-                                          out_dir=a.out)
+                                          out_dir=a.out, wp_model=a.wp_model)
     except NotImplementedError as exc:
         raise CLIError(f"train_q not available: {exc}") from None
     timings["train_q"] = time.perf_counter() - t0

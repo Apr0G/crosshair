@@ -175,9 +175,12 @@ def build_index(h, side_table: pl.DataFrame, *, hnsw_threshold: int = HNSW_MIN_N
     return NeighbourIndex(parts=parts, table=table, d=d)
 
 
-def save_index(nidx: NeighbourIndex, out_dir: Path | None = None, *, cfg=None) -> Path:
+def save_index(nidx: NeighbourIndex, out_dir: Path | None = None, *, cfg=None, q_model: str | None = None,
+               q_vocab_sha256: str | None = None, wp_model: str | None = None) -> Path:
     """Write partition indices + side table + meta (+ manifest) to `out_dir` (default
-    the next `paths.MODELS_DIR / neighbours_v<N>`)."""
+    the next `paths.MODELS_DIR / neighbours_v<N>`). The manifest records which Q model
+    (and its vocab sha256) encoded the descriptor ids and which WP model produced the
+    stored h_pre, so `analyze` can refuse a mismatched pair (MED-17, 2026-10-19)."""
     from engine.value.q_model import next_version_dir
     out = Path(out_dir) if out_dir is not None else next_version_dir(paths.MODELS_DIR, "neighbours_v")
     out.mkdir(parents=True, exist_ok=True)
@@ -193,7 +196,8 @@ def save_index(nidx: NeighbourIndex, out_dir: Path | None = None, *, cfg=None) -
     (out / META_FILE).write_text(json.dumps({"d": nidx.d, "n": nidx.n, "parts": meta_parts}, indent=2),
                                  encoding="utf-8")
     manifest.write(out, "neighbours", outputs=outputs, extra={"kind": nidx.kind, "n": nidx.n, "d": nidx.d,
-                                                              "n_parts": len(meta_parts)},
+                                                              "n_parts": len(meta_parts), "q_model": q_model,
+                                                              "q_vocab_sha256": q_vocab_sha256, "wp_model": wp_model},
                    **({"cfg": cfg} if cfg is not None else {}))
     return out
 

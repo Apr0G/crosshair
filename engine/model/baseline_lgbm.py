@@ -214,8 +214,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=None, help="default models/baseline_v<N+1>")
     a = ap.parse_args(argv)
     cfg   = config.load()
-    tr, va = dataset.read_shards(a.train), dataset.read_shards(a.val)
-    te    = dataset.read_shards(a.test)
+    try:
+        if a.vocab:
+            for split in (a.train, a.val, a.test):
+                dataset.check_artifacts(split, a.vocab)
+        tr, va = dataset.read_shards(a.train), dataset.read_shards(a.val)
+        te    = dataset.read_shards(a.test)
+        for what, arr in (("--train", tr), ("--val", va), ("--test", te)):
+            if dataset.n_labelled(arr) == 0:
+                raise ValueError(f"{what} split has no labelled rows")
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"baseline: {exc}", file=sys.stderr)
+        return 2
     te    = dataset.take(te, np.flatnonzero(te["tier"] == "pro")) if (te["tier"] == "pro").any() else te
     vocab = dataset.Vocab.load(a.vocab) if a.vocab else None
     b     = train(tr, va, seed=cfg.train.seed)

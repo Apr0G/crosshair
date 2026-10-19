@@ -549,7 +549,51 @@ def write_shards(split_name: str, snapshots_iter: Iterable[Snapshot], shard_size
 
 def _resolve(split: str | Path, base: Path | None) -> Path:
     p = Path(split)
-    return p if p.is_dir() else split_dir(str(split), base)
+    d = p if p.is_dir() else split_dir(str(split), base)
+    if not d.is_dir():                                   # a typo'd split must not read as "no rows" (MED-19)
+        raise FileNotFoundError(f"split {split!r} not found: no directory {d}")
+    return d
+
+
+def shard_index(split: str | Path, base: Path | None = None) -> dict:
+    """The split's `index.json` (an empty dict for a directory written without one)."""
+    idx = _resolve(split, base) / SHARD_INDEX
+    return json.loads(idx.read_text(encoding="utf-8")) if idx.is_file() else {}
+
+
+def _amend_index(split: str | Path, base: Path | None, **extra) -> None:
+    d = _resolve(split, base)
+    idx = d / SHARD_INDEX
+    if idx.is_file():
+        doc = json.loads(idx.read_text(encoding="utf-8"))
+        doc.setdefault("extra", {}).update(extra)
+        idx.write_text(json.dumps(doc, indent=1, sort_keys=True), encoding="utf-8")
+
+
+def check_artifacts(split: str | Path, vocab_path: Path | None = None, norm_path: Path | None = None,
+                    base: Path | None = None) -> None:
+    """Refuse a vocab / norm file that is not the one the split was built with (compared
+    by sha256 recorded in the split index; MED-18, 2026-10-19). Splits built before the
+    hashes were recorded are not checked."""
+    from engine.manifest import sha256_file
+    extra = shard_index(split, base).get("extra") or {}
+    for what, path, key in (("vocab", vocab_path, "vocab_sha256"), ("norm", norm_path, "norm_sha256")):
+        want = extra.get(key)
+        if path is None or want is None:
+            continue
+        have = sha256_file(Path(path))
+        if have != want:
+            raise ValueError(f"{Path(path).name} is not the {what} split {split!r} was built with "
+                             f"(sha256 {have[:12]} != {want[:12]}); pass the file named in the split index "
+                             f"({extra.get(what)})")
+
+
+def n_labelled(arrays: dict, tiers=()) -> int:
+    """Rows with a win label (and, when `tiers` is given, of one of those tiers)."""
+    ok = ~np.isnan(arrays["y_win"])
+    if tiers:
+        ok &= np.isin(arrays["tier"], list(tiers))
+    return int(ok.sum())
 
 
 def iter_shards(split: str | Path, base: Path | None = None) -> Iterator[dict[str, np.ndarray]]:
@@ -635,9 +679,10 @@ def build(catalog, split_file, tiers=None, maps=None, sample_hz: float | None = 
     vocab = Vocab().fit(_iter_states(chosen["train"], root, sample_hz))
     version = next_version(out_base, "vocab_v")
     vocab_path = vocab.save(out_base / f"vocab_v{version}.json")
+    from engine.manifest import sha256_file
     extra = {"split_file": str(split_file), "split_hash": splits.file_hash(split_file),
              "tiers": list(tiers) if tiers else None, "maps": list(maps) if maps else None,
-             "sample_hz": sample_hz, "vocab": vocab_path.name}
+             "sample_hz": sample_hz, "vocab": vocab_path.name, "vocab_sha256": sha256_file(vocab_path)}
     written = {}
     for name, sel in chosen.items():
         written[name] = write_shards(name + suffix, _iter_states(sel, root, sample_hz), shard_size,
@@ -645,6 +690,8 @@ def build(catalog, split_file, tiers=None, maps=None, sample_hz: float | None = 
                                      extra={**extra, "matches": [r["match_key"] for r in sel]})
     norm = NormStats.fit(iter_shards("train" + suffix, out_base))
     norm_path = norm.save(out_base / f"norm_v{version}.json")
+    for name in ("train", "val", "test"):                 # every split knows its norm file too
+        _amend_index(name + suffix, out_base, norm=norm_path.name, norm_sha256=sha256_file(norm_path))
     return {"vocab": vocab_path, "norm": norm_path, "shards": written,
             "n_matches": {k: len(v) for k, v in chosen.items()}}
 

@@ -100,6 +100,12 @@ def load_model_dir(run_dir: Path, device="cpu", name: str | None = None):
     norm    = NormStats.load(run_dir / "norm.json")
     cal_p   = run_dir / "calibration.json"
     cal     = json.loads(cal_p.read_text(encoding="utf-8")) if cal_p.is_file() else None
+    if cal is not None and cal.get("state_hash"):          # fitted for THIS checkpoint? (MED-20)
+        have = state_hash(model.state_dict())
+        if have != cal["state_hash"]:
+            raise ValueError(f"{run_dir.name}/calibration.json was fitted for checkpoint "
+                             f"{cal.get('checkpoint')} ({cal['state_hash'][:8]}), but {path.name} ({have[:8]}) "
+                             f"was loaded; re-run calibrate for this checkpoint")
     return model, vocab, norm, cal, path
 
 

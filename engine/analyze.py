@@ -179,6 +179,11 @@ class ValueModels:
 
     @classmethod
     def load(cls, q_dir: Path, neighbours_dir: Path, device: str = "cpu") -> "ValueModels":
+        """Load the Q/B nets and the neighbour index. The index must have been built with
+        this Q model's descriptor vocab (manifest `q_vocab_sha256`); a different vocab
+        means its stored ids point at other tokens, so the pair is refused (MED-17).
+        `versions` also carries the WP model each artifact was built from, when known,
+        for the caller's mismatch warning."""
         q_dir, neighbours_dir = Path(q_dir), Path(neighbours_dir)
         for d in (q_dir, neighbours_dir):
             if not d.is_dir():
@@ -187,11 +192,43 @@ class ValueModels:
             from engine.value import neighbours, q_model, shrinkage
         except ImportError as exc:
             raise ModelUnavailable(f"value modules unavailable: {exc}") from exc
+        q_extra, n_extra = _manifest_extra(q_dir), _manifest_extra(neighbours_dir)
+        want = n_extra.get("q_vocab_sha256")
+        if want is not None and (q_dir / "vocab.json").is_file() and want != q_model.vocab_sha256(q_dir):
+            raise ModelUnavailable(f"neighbour index {neighbours_dir.name} was built with the descriptor vocab of "
+                                   f"{n_extra.get('q_model') or 'another Q model'}, not {q_dir.name}; rebuild it "
+                                   f"with --q-model {q_dir.name}")
         q, b, vocab, _metrics = q_model.load_q(q_dir, device=device)
         index = neighbours.load_index(neighbours_dir)
         k_path = q_dir / shrinkage.FILE_NAME
         k_map = shrinkage.load(k_path) if k_path.is_file() else None
-        return cls(q, b, vocab, index, k_map, None, {"q": q_dir.name, "neighbours": neighbours_dir.name})
+        versions = {"q": q_dir.name, "neighbours": neighbours_dir.name,
+                    "q_wp_model": q_extra.get("wp_model"), "neighbours_wp_model": n_extra.get("wp_model"),
+                    "provenance": "checked" if want is not None else "unrecorded"}
+        return cls(q, b, vocab, index, k_map, None, versions)
+
+
+def _manifest_extra(d: Path) -> dict:
+    try:
+        return dict(manifest.read(d).get("extra") or {})
+    except (OSError, ValueError, manifest.ManifestSchemaError):
+        return {}
+
+
+def warn_value_provenance(vm, wp_name, warnings: list, logger=None) -> None:
+    """One `value_provenance` warning per value artifact built from another WP model
+    than the one analysing, and one when the index's vocab link is unrecorded."""
+    if vm is None:
+        return
+    v = vm.versions or {}
+    for key in ("q_wp_model", "neighbours_wp_model"):
+        rec = v.get(key)
+        if rec is not None and wp_name is not None and rec != wp_name:
+            _warn(warnings, "value_provenance", f"{v.get(key.split('_')[0])} was built from WP model {rec}, "
+                  f"this analysis uses {wp_name}: Q / regret use another encoder's h_pre", logger)
+    if v.get("provenance") == "unrecorded":
+        _warn(warnings, "value_provenance", f"neighbour index {v.get('neighbours')} does not record which Q vocab "
+              "built it (built before 2026-10-19); rebuild to make the link checkable", logger)
 
 
 # ── result ────────────────────────────────────────────────────────────────────
@@ -336,7 +373,7 @@ def load_predictor(model_dir: Path, device: str | None):
     except ImportError as exc:
         raise ModelUnavailable(f"engine.model.predict unavailable: {exc}") from exc
     try:
-        return Predictor(model_dir, device)
+        return Predictor(model_dir, device, require_calibration=True)    # R6: never uncalibrated (MED-20)
     except NotImplementedError as exc:
         raise ModelUnavailable(f"Predictor not implemented yet: {exc}") from exc
     except FileNotFoundError as exc:
@@ -854,6 +891,7 @@ def analyze_demo(path, *, tier: str, out_dir, model_dir=None, device: str | None
     if value_dirs is not None:
         check_value_models(value_dirs, allow_unadopted, warnings, logger)
         vm = ValueModels.load(value_dirs[0], value_dirs[1], device or "cpu")
+        warn_value_provenance(vm, model_versions.get("wp"), warnings, logger)
 
     with timed("parse", timings):
         tables, meta = awpy3_parser.parse(path)

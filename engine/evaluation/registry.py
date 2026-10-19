@@ -134,6 +134,9 @@ def adopt(name: str, numbers: dict, rule: str, *, doc: Path | None = None, when:
         mdir = Path(models_dir) if models_dir is not None else paths.MODELS_DIR
         if not (mdir / name / "manifest.json").is_file():
             raise ValueError(f"no manifest for {name} under the models directory")
+        if kind_of(name) == "wp" and not (mdir / name / "calibration.json").is_file():
+            raise ValueError(f"{name} has no calibration.json: run `calibrate` first; an uncalibrated win model "
+                             f"is never adopted (R6, MED-20)")
     rule = (rule or "").strip()
     if not rule or "|" in rule or "\n" in rule:
         raise ValueError("rule must be one non-empty line without '|'")

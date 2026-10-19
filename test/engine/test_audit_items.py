@@ -104,6 +104,7 @@ def high_02() -> None:
           str(sorted(analyze.adopted_models(doc))))
     for name in ("wp_v7", "wp_v8"):
         (d / name).mkdir(); (d / name / "manifest.json").write_text("{}", encoding="utf-8")
+        (d / name / "calibration.json").write_text("{}", encoding="utf-8")       # R6 gate (MED-20) satisfied
     try:
         rg.adopt("wp_v8", {"logloss": 0.46, "brier": 0.15, "ece": 0.012, "baseline_logloss": 0.49},
                  "beats wp_v3 on pro test", doc=doc, models_dir=d)
@@ -381,10 +382,85 @@ def med_14() -> None:
     check("no stray _parent attribute survives", all(not hasattr(a, "_parent") for a in acts))
 
 
+def med_17() -> None:
+    """2026-10-19 MED-17: the Q model, the neighbour index and the WP encoder recorded no
+    link to each other; ValueModels.load now refuses an index built with another vocab."""
+    import json
+    from engine import analyze, manifest
+    d = TMP / "m17"; q = d / "q_v1"; n = d / "neighbours_v1"
+    q.mkdir(parents=True); n.mkdir(parents=True)
+    (q / "vocab.json").write_text(json.dumps({"fields": [], "unk": 0, "pad": 1, "maps": {}}), encoding="utf-8")
+    manifest.write(q, "q_model", outputs=["vocab.json"], extra={"wp_model": "wp_v1"})
+    manifest.write(n, "neighbours", outputs=[], extra={"q_model": "q_v0", "q_vocab_sha256": "0" * 64, "wp_model": "wp_v1"})
+    try:
+        analyze.ValueModels.load(q, n)
+        check("index built with another Q vocab refused", False)
+    except analyze.ModelUnavailable as exc:
+        check("index built with another Q vocab refused", "descriptor vocab" in str(exc) and "q_v0" in str(exc), str(exc))
+    class VM:
+        versions = {"q": "q_v1", "neighbours": "neighbours_v1", "q_wp_model": "wp_v1",
+                    "neighbours_wp_model": "wp_v2", "provenance": "checked"}
+    w: list = []
+    analyze.warn_value_provenance(VM(), "wp_v3", w)
+    check("one value_provenance warning per artifact built from another WP model",
+          [x["code"] for x in w] == ["value_provenance", "value_provenance"] and "wp_v2" in w[1]["message"], str(w))
+
+
+def med_18_19() -> None:
+    """2026-10-19 MED-18 / MED-19: shards never checked their vocab / norm; an empty or
+    missing split crashed after a full epoch."""
+    import json
+    import numpy as np
+    from engine.data import dataset
+    d = TMP / "m18"; (d / "train").mkdir(parents=True)
+    vocab = d / "vocab_v1.json"; vocab.write_text("{}", encoding="utf-8")
+    other = d / "vocab_v2.json"; other.write_text("{ }", encoding="utf-8")
+    from engine.manifest import sha256_file
+    (d / "train" / dataset.SHARD_INDEX).write_text(json.dumps({"split": "train", "n": 0, "shards": [], "counts": [],
+        "layout_hash": dataset.layout_hash(), "keys": list(dataset.BATCH_KEYS),
+        "extra": {"vocab": vocab.name, "vocab_sha256": sha256_file(vocab)}}), encoding="utf-8")
+    dataset.check_artifacts("train", vocab, base=d)
+    try:
+        dataset.check_artifacts("train", other, base=d)
+        check("a vocab other than the one the shards were built with is refused", False)
+    except ValueError as exc:
+        check("a vocab other than the one the shards were built with is refused", "vocab_v1.json" in str(exc), str(exc))
+    try:
+        dataset.read_shards("no_such_split", base=d)
+        check("a missing split raises instead of reading as zero rows", False)
+    except FileNotFoundError:
+        check("a missing split raises instead of reading as zero rows", True)
+    arrays = dataset.empty_arrays(0)
+    check("n_labelled of an empty split is 0", dataset.n_labelled(arrays) == 0 and dataset.n_labelled(arrays, ("pro",)) == 0)
+    check("n_labelled counts win labels", dataset.n_labelled({"y_win": np.array([0.0, np.nan, 1.0]),
+                                                              "tier": np.array(["pro", "pro", "faceit_10"])}, ("pro",)) == 1)
+
+
+def med_20() -> None:
+    """2026-10-19 MED-20: the Predictor served a plain sigmoid when calibration.json was
+    missing; adoption did not require it; calibration never named its checkpoint."""
+    import inspect
+    from engine import analyze
+    from engine.evaluation import registry as rg
+    from engine.model import predict
+    check("Predictor has require_calibration and analyze.load_predictor passes it",
+          "require_calibration" in inspect.signature(predict.Predictor.__init__).parameters
+          and "require_calibration=True" in inspect.getsource(analyze.load_predictor))
+    d = TMP / "m20"; (d / "wp_v5").mkdir(parents=True)
+    (d / "wp_v5" / "manifest.json").write_text("{}", encoding="utf-8")
+    doc = _models_doc(d / "ENGINE_MODELS.md", "")
+    try:
+        rg.adopt("wp_v5", {"logloss": 0.46, "brier": 0.15, "ece": 0.012, "baseline_logloss": 0.49}, "ok",
+                 doc=doc, models_dir=d)
+        check("adopting a wp model without calibration.json refused", False)
+    except ValueError as exc:
+        check("adopting a wp model without calibration.json refused", "calibration.json" in str(exc), str(exc))
+
+
 # ── runner ────────────────────────────────────────────────────────────────────
 
 ITEMS = [crit_01, high_01, high_02, high_03, high_04, high_05, high_06, med_02, med_04, med_06,
-         med_07, med_08, med_09, med_10, med_14]
+         med_07, med_08, med_09, med_10, med_14, med_17, med_18_19, med_20]
 
 section("audit items (docs/reviews)")
 for fn in ITEMS:

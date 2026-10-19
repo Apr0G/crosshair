@@ -221,7 +221,7 @@ def _seed_all(seed: int) -> None:
 def train_q(frame: pl.DataFrame, h: np.ndarray, vocab: DescriptorVocab, cfg,
             split_fn: Callable[[pl.DataFrame], object], device="cpu", *,
             params: QTrainParams | None = None, out_dir: Path | None = None,
-            save: bool = True) -> tuple[QNet, BNet, dict]:
+            save: bool = True, wp_model: str | None = None) -> tuple[QNet, BNet, dict]:
     """Train QNet and BNet on the rows `split_fn(frame) == "train"`, early-stopping each
     on its own Huber loss over the "val" rows (train loss when there is no val row).
     `split_fn(frame)` returns one split name per row. Seeded from `cfg.train.seed`.
@@ -301,7 +301,7 @@ def train_q(frame: pl.DataFrame, h: np.ndarray, vocab: DescriptorVocab, cfg,
     }
     if save:
         out = Path(out_dir) if out_dir is not None else next_version_dir(paths.MODELS_DIR, "q_v")
-        save_q(out, q, b, vocab, metrics, cfg)
+        save_q(out, q, b, vocab, metrics, cfg, wp_model=wp_model)
         metrics["dir"] = str(out)
     return q, b, metrics
 
@@ -320,7 +320,12 @@ def val_loss_on(model, th, td, tt, ts, ty, idx, is_q: bool, delta: float = HUBER
 
 # ── checkpoints ───────────────────────────────────────────────────────────────
 
-def save_q(out_dir: Path, q: QNet, b: BNet, vocab: DescriptorVocab, metrics: dict, cfg=None) -> Path:
+def save_q(out_dir: Path, q: QNet, b: BNet, vocab: DescriptorVocab, metrics: dict, cfg=None,
+           *, wp_model: str | None = None) -> Path:
+    """Write the Q/B nets, the descriptor vocab, metrics and a manifest whose `extra`
+    records the vocab's sha256 and the WP model whose encoder produced h_pre (when the
+    caller knows it), so a neighbour index and an analysis can check they match
+    (MED-17, 2026-10-19)."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     torch.save({"args": q.args(), "state": {k: v.detach().cpu() for k, v in q.state_dict().items()}}, out / Q_FILE)
@@ -328,9 +333,16 @@ def save_q(out_dir: Path, q: QNet, b: BNet, vocab: DescriptorVocab, metrics: dic
     vocab.save(out / VOCAB_FILE)
     (out / METRICS_FILE).write_text(json.dumps(metrics, indent=2, sort_keys=True, default=str), encoding="utf-8")
     manifest.write(out, "q_model", outputs=[Q_FILE, B_FILE, VOCAB_FILE, METRICS_FILE],
-                   extra={"n_train": metrics.get("n_train"), "d_h": metrics.get("d_h")},
+                   extra={"n_train": metrics.get("n_train"), "d_h": metrics.get("d_h"),
+                          "vocab_sha256": manifest.sha256_file(out / VOCAB_FILE), "wp_model": wp_model},
                    **({"cfg": cfg} if cfg is not None else {}))
     return out
+
+
+def vocab_sha256(model_dir: Path) -> str:
+    """sha256 of `<model_dir>/vocab.json`, the identity of the descriptor ids a Q model
+    and a neighbour index must share."""
+    return manifest.sha256_file(Path(model_dir) / VOCAB_FILE)
 
 
 def load_q(model_dir: Path, device="cpu") -> tuple[QNet, BNet, DescriptorVocab, dict]:

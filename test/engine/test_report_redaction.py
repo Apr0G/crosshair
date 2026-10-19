@@ -30,6 +30,7 @@ from engine.state.players import player_id_hash    # noqa: E402
 STEAMID = "76561198012345678"
 URL     = "https://demos.example.com/m1.dem.zst?X-Amz-Signature=SECRETSIG"
 OUTSIDE = str(Path.home() / "Documents" / "private" / "demo.dem")
+SPACED  = str(Path.home() / "Some User" / "Program Files" / "model dir" / "x.pt")   # MED-22
 CFG     = config.load()
 
 
@@ -40,6 +41,7 @@ def run(name: str, show_ids: bool):
         {"code": "seed_path", "message": f"read {OUTSIDE} and /home/faig/secret/file.txt"},
         {"code": "seed_inside", "message": f"wrote {out / 'charts' / 'x.png'}"},
         {"code": "seed_steamid", "message": f"player {STEAMID} disconnected"},
+        {"code": "seed_spaced", "message": f"loaded {SPACED} (fallback)"},
     ]
     analyze.analyze_tables(make_raw_tables("trade"), match_key="syn_trade", tier="pro", geometry=FlatGeometry(),
                            predictor=RuleStub(good_win), cfg=CFG, out_dir=out, warnings=seeded,
@@ -65,6 +67,12 @@ for text, name in ((js, "report.json"), (md, "report.md")):
     check(f"{name}: no SteamID64", STEAMID not in text and not re.search(r"7656119\d{10}", text))
     check(f"{name}: no repo path", str(Path(__file__).resolve().parents[2]) not in text)
 msgs = {w["code"]: w["message"] for w in rep["warnings"]}
+check("spaced path under home redacted whole (MED-22)", "Some User" not in js and "Program Files" not in js
+      and "model dir" not in js and msgs["seed_spaced"].startswith("loaded <path>"), msgs["seed_spaced"])
+leaks = writer.find_leaks({"m": f"see {SPACED} now", "u": URL, "s": STEAMID})
+check("find_leaks sees the spaced path, the URL and the id, and never echoes them (MED-23)",
+      len(leaks) == 3 and all(("Some User" not in l and "SECRETSIG" not in l and STEAMID not in l) for l in leaks),
+      str(leaks))
 check("URL replaced by <url>", "<url>" in msgs["seed_url"])
 check("outside paths replaced by <path>", msgs["seed_path"].count("<path>") == 2)
 check("inside path made relative", "charts/x.png" in msgs["seed_inside"] and "<path>" not in msgs["seed_inside"])

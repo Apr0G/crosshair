@@ -22,10 +22,13 @@ Filled by: P10.2.1, P10.2.2, P10.2.4.
 import hashlib
 import json
 import math
+import os
 import re
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
+from engine import paths
 from engine.report import cards
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -73,8 +76,68 @@ def _scrub_path(m: re.Match, out_dir: Path | None) -> str:
     return PATH_TOKEN
 
 
+def _rel_or_keep(m: re.Match, out_dir: Path | None) -> str:
+    """Paths inside out_dir become relative; anything else is left for the later passes."""
+    text = m.group(0)
+    if out_dir is not None:
+        try:
+            return Path(text).resolve().relative_to(Path(out_dir).resolve()).as_posix()
+        except (ValueError, OSError):
+            pass
+    return text
+
+
+def known_roots() -> tuple[str, ...]:
+    """Directory prefixes that identify this machine or user: home, cwd, the repo, its
+    data dir and the temp dir, in both separator spellings, longest first. A path under
+    one of these is redacted whole, spaces included (MED-22, 2026-10-19): the old
+    whitespace-free regex stopped at the first space of a user name or folder and left
+    the rest of the path behind."""
+    roots: set[str] = set()
+    cands = [Path.home(), Path.cwd(), paths.ROOT, paths.DATA_DIR, Path(tempfile.gettempdir())]
+    for c in cands:
+        for p in {c, c.resolve()}:
+            s = str(p).rstrip("\\/")
+            if len(s) > 3:                       # never a bare drive
+                roots.add(s)
+                roots.add(s.replace("\\", "/"))
+                roots.add(s.replace("/", "\\"))
+    return tuple(sorted(roots, key=len, reverse=True))
+
+
+# The rest of the path after a known root: directory segments may contain spaces (each
+# is followed by another separator); the final segment stops at whitespace.
+_ROOT_TAIL = ("(?:[\\\\/][^\\\\/\\s'\"<>|()]+(?:[ ][^\\\\/\\s'\"<>|()]+)*(?=[\\\\/]))*"   # dirs, spaces inside
+              "(?:[\\\\/][^\\s'\"<>|()]*)?")                                            # final segment
+
+
+def _roots_re() -> re.Pattern:
+    alts = "|".join(re.escape(r) for r in known_roots())
+    return re.compile(rf"(?<![A-Za-z0-9_])(?:{alts}){_ROOT_TAIL}", re.IGNORECASE if os.name == "nt" else 0)
+
+
+def _scrub_roots(s: str, out_dir: Path | None) -> str:
+    def one(m: re.Match) -> str:
+        text = m.group(0).rstrip(" .,;:")
+        tail = m.group(0)[len(text):]
+        return _scrub_path(_Match(text), out_dir) + tail
+    return _roots_re().sub(one, s)
+
+
+class _Match:
+    """A minimal stand-in so `_scrub_path` can be reused on a trimmed string."""
+    def __init__(self, text: str):
+        self._t = text
+    def group(self, _i=0) -> str:
+        return self._t
+
+
 def scrub_text(s: str, out_dir: Path | None = None, show_ids: bool = False) -> str:
     s = _URL_RE.sub(URL_TOKEN, s)
+    if out_dir is not None:                      # exact out_dir paths first: they become relative
+        s = _WIN_PATH_RE.sub(lambda m: _rel_or_keep(m, out_dir), s)
+        s = _POSIX_RE.sub(lambda m: _rel_or_keep(m, out_dir), s)
+    s = _scrub_roots(s, out_dir)                 # known roots, spaces and all
     s = _WIN_PATH_RE.sub(lambda m: _scrub_path(m, out_dir), s)
     s = _POSIX_RE.sub(lambda m: _scrub_path(m, out_dir), s)
     if not show_ids:
@@ -112,17 +175,20 @@ def _strings(obj, key=None):
 
 def find_leaks(obj, out_dir: Path | None = None, show_ids: bool = False) -> list[str]:
     """Every string (and integer) that breaks P10.2.4: a URL, an absolute path outside
-    `out_dir`, or (without `show_ids`) a SteamID64."""
+    `out_dir` (a known root with spaces included), or (without `show_ids`) a SteamID64.
+    Messages name the key and the kind only, never the matched text (R9; MED-23)."""
     out = []
+    rr = _roots_re()
     for s, key in _strings(obj):
         if _URL_RE.search(s):
-            out.append(f"url in {key}: {s[:80]}")
-        for rx in (_WIN_PATH_RE, _POSIX_RE):
-            for m in rx.finditer(s):
-                if _scrub_path(m, out_dir) == PATH_TOKEN:
-                    out.append(f"path in {key}: {m.group(0)[:80]}")
+            out.append(f"url in {key}")
+            s = _URL_RE.sub(URL_TOKEN, s)             # a URL's own path part is not a second leak
+        if any(_scrub_path(_Match(m.group(0).rstrip(" .,;:")), out_dir) == PATH_TOKEN for m in rr.finditer(s)):
+            out.append(f"path (known root) in {key}")
+        elif any(_scrub_path(m, out_dir) == PATH_TOKEN for rx in (_WIN_PATH_RE, _POSIX_RE) for m in rx.finditer(s)):
+            out.append(f"path in {key}")
         if not show_ids and _STEAMID_RE.search(s):
-            out.append(f"steamid in {key}: {s[:80]}")
+            out.append(f"steamid in {key}")
     return out
 
 

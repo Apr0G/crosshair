@@ -66,13 +66,20 @@ def _t(s) -> float:
 
 class Predictor:
     def __init__(self, checkpoint, device=None, *, cache: bool = True, batch_size: int = 512,
-                 max_cache: int = 100_000, checkpoint_name: str | None = None, bf16: bool = False):
+                 max_cache: int = 100_000, checkpoint_name: str | None = None, bf16: bool = False,
+                 require_calibration: bool = False):
+        """`require_calibration=True` (what `analyze` passes) refuses a model directory
+        without calibration.json: a plain sigmoid is never served as a win probability
+        in production (R6; MED-20, 2026-10-19). Tests and training tools may load an
+        uncalibrated model explicitly."""
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         # bf16 autocast (GPU only): ~2x throughput, logits within ~1e-2 of fp32 (test_wp_model);
         # off by default because attribution differences W(s') - W(s) can be that small
         self.bf16   = bool(bf16) and self.device == "cuda" and torch.cuda.is_bf16_supported()
         (self.model, self.vocab, self.norm, self.calibration,
          self.checkpoint_path) = checkpoints.load_model_dir(checkpoint, self.device, checkpoint_name)
+        if require_calibration and self.calibration is None:
+            raise FileNotFoundError(str(Path(checkpoint) / "calibration.json"))
         self.model.eval()
         self.window_s   = self.model.window_s
         self.use_cache  = cache
