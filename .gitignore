@@ -22,7 +22,9 @@ data/_tmp_demos/
 # Ignore the data directory wholesale. Pattern-matching individual names kept missing
 # variants — data/backup.db, data/crosshair.db.old, sqlite sidecars — and each of
 # those is GBs of real player nicknames and Steam IDs headed for a public repo.
-data/
+# Anchored to the repo root: the unanchored `data/` also swallowed the source package
+# `engine/data/` (found by the 2026-10-19 audit, CRIT-01).
+/data/
 *.lgb
 
 # secrets
@@ -30,6 +32,8 @@ data/
 # .env.backup were committable. Prefix-match instead, then re-include the template.
 .env*
 !.env.example
+# a dotless `env` at the root is a one-keystroke typo for `.env`; `.env*` does not match it
+/env
 
 # run logs — contain player nicknames, match ids and demo URLs
 *.log
