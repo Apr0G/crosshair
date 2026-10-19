@@ -104,11 +104,18 @@ def gpu_name(probe: bool = False) -> str | None:
     return None
 
 
+def host_id() -> str:
+    """A stable, anonymous id of this machine: sha256 of the hostname, 16 hex chars.
+    The name itself never enters a manifest (MED-07, 2026-10-19)."""
+    return hashlib.sha256(socket.gethostname().encode("utf-8")).hexdigest()[:16]
+
+
 def _describe_input(p: Path) -> dict:
     p = Path(p)
     if not p.is_file():
         raise FileNotFoundError(f"manifest input is not a file: {p}")
-    return {"path": str(p), "sha256": sha256_file(p), "bytes": p.stat().st_size}
+    # file name only: a manifest travels with its output folder (R14, MED-07 2026-10-19)
+    return {"path": p.name, "sha256": sha256_file(p), "bytes": p.stat().st_size}
 
 
 def _describe_output(run_dir: Path, p) -> dict:
@@ -143,7 +150,7 @@ def build(run_dir: Path, kind: str, inputs: Iterable = (), outputs: Iterable = (
         "inputs":            [_describe_input(p) for p in inputs],
         "outputs":           [_describe_output(run_dir, p) for p in outputs],
         "timings":           {k: float(v) for k, v in (timings or {}).items()},
-        "hostname":          socket.gethostname(),
+        "hostname":          host_id(),
         "platform":          platform.platform(),
         "python":            platform.python_version(),
         "gpu":               gpu_name(probe_gpu),

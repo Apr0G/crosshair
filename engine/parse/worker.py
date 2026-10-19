@@ -28,7 +28,7 @@ import json
 import os
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -137,8 +137,10 @@ def parse_one(path: Path, out_dir: Path, parser: Parser | None = None, force: bo
             _write(path, out_dir / key, raw.frames(), meta, timings)
             return {"match_key": key, "status": "parsed", "attempts": attempt,
                     "seconds": round(sum(timings.values()), 3)}
-        except Exception as exc:                  # retried once, then reported
-            last = exc
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:              # retried once, then reported; a pyo3 PanicException
+            last = exc                            # is a BaseException and must not escape (MED-11)
     return {"match_key": key, "status": "failed", "attempts": MAX_ATTEMPTS, "path": str(path),
             "exc_type": type(last).__name__, "error": redact_text(str(last))}
 
@@ -186,8 +188,23 @@ def run(demo_dir: Path, *, out_dir: Path | None = None, procs: int | None = None
     if procs == 1 or len(demos) <= 1:
         results = [jobs(*a) for a in args]
     else:
+        # submit + as_completed: a worker that dies hard (Rust abort) breaks the pool and
+        # fails every pending future; each becomes a `failed` result naming its demo, so
+        # `_failures.jsonl` is still written (MED-11, 2026-10-19).
+        results = []
         with ProcessPoolExecutor(max_workers=min(procs, len(demos))) as pool:
-            results = list(pool.map(jobs, *zip(*args)))
+            futures = {pool.submit(jobs, *a): a[0] for a in args}
+            for fut in as_completed(futures):
+                p = futures[fut]
+                try:
+                    results.append(fut.result())
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as exc:
+                    results.append({"match_key": match_key(p), "status": "failed", "attempts": 1,
+                                    "path": str(p), "exc_type": type(exc).__name__,
+                                    "error": redact_text(str(exc) or "worker process died")})
+        results.sort(key=lambda r: r["match_key"])
     if not smoke:
         _append_failures(out_dir, results)
     counts: dict[str, int] = {}

@@ -51,6 +51,13 @@ section("default (ids hashed)")
 out, js, md = run("default", False)
 rep = json.loads(js)
 check("find_leaks: none in report.json", writer.find_leaks(rep, out) == [], str(writer.find_leaks(rep, out)[:3]))
+import socket  # noqa: E402
+for f in sorted(p for p in out.rglob("*") if p.suffix in (".json", ".md", ".txt")):
+    text = f.read_text(encoding="utf-8")
+    obj = json.loads(text) if f.suffix == ".json" else text
+    leaks = writer.find_leaks(obj, out)
+    check(f"{f.relative_to(out)}: find_leaks empty, no hostname (MED-07)",
+          leaks == [] and socket.gethostname() not in text, str(leaks[:3]))
 for text, name in ((js, "report.json"), (md, "report.md")):
     check(f"{name}: no URL", "http" not in text and "SECRETSIG" not in text)
     check(f"{name}: no outside path", OUTSIDE not in text and "Documents" not in text and "/home/faig" not in text)

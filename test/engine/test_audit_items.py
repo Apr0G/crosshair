@@ -296,9 +296,95 @@ def med_06() -> None:
           db.register_match({"match_key": "m06", "demo_sha256": "1" * 64}) == "m06")
 
 
+def med_07() -> None:
+    """2026-10-19 MED-07: manifest.json recorded the absolute demo path and the hostname."""
+    import json, socket
+    from engine import manifest
+    d = TMP / "m07"; d.mkdir(); demo = d / "some match.dem"; demo.write_bytes(b"PBDEMS2\x00" * 8)
+    man = manifest.write(d, "parse", inputs=[demo], outputs=[])
+    text = (d / manifest.MANIFEST_NAME).read_text(encoding="utf-8")
+    check("input recorded by file name + sha256, no directory", man["inputs"][0]["path"] == "some match.dem"
+          and str(d) not in text and "Users" not in man["inputs"][0]["path"])
+    check("hostname replaced by a 16-hex machine id", socket.gethostname() not in text
+          and len(man["hostname"]) == 16 and all(c in "0123456789abcdef" for c in man["hostname"]))
+    check("manifest still round-trips", json.loads(text)["inputs"][0]["sha256"] == manifest.sha256_file(demo))
+
+
+def med_08() -> None:
+    """2026-10-19 MED-08: decoys never expired in the state (null end -> active to round end)."""
+    import polars as pl
+    from _synthetic import PLAYERS, make_raw_tables
+    from engine.state import utility
+    from engine.state.builder import RoundView
+    raw = make_raw_tables("base", 128)
+    row = dict(entity_id=777, thrower_steamid=PLAYERS["C"][0], type="decoy", throw_tick=1300, detonate_tick=1400,
+               expire_tick=None, x=50.0, y=50.0, z=0.0)
+    gren = pl.concat([raw.grenades, pl.DataFrame([row], schema=raw.grenades.schema)])
+    r2 = raw.__class__(**{**raw.__dict__, "grenades": gren})
+    v = RoundView.build(r2, 1)
+    life = int(utility.NOMINAL_DURATION_S["decoy"] * 128)
+    check("builder gives a decoy with no end its nominal life", v.decoys[-1]["end_tick"] == 1400 + life)
+    alive_at = lambda t: any(u.kind == "decoy" for u in utility.tokens(v.until(t))[0])  # noqa: E731
+    check("decoy token present during its life, gone after it (not forever)",
+          alive_at(1500) and not alive_at(1400 + life + 1))
+
+
+def med_09() -> None:
+    """2026-10-19 MED-09: kills_round counted self-kills and kills with unknown team_kill."""
+    import polars as pl
+    from _synthetic import PLAYERS, make_raw_tables
+    from engine.state import players, utility
+    from engine.state.builder import RoundView
+    from engine.state.geometry import FlatGeometry
+    raw = make_raw_tables("base", 128)
+    a_sid, a_side = PLAYERS["A"]
+    k = raw.kills.row(0, named=True)
+    self_kill = {**k, "tick": 1600, "attacker_steamid": a_sid, "victim_steamid": a_sid, "team_kill": False}
+    unknown   = {**k, "tick": 1601, "attacker_steamid": a_sid, "victim_steamid": PLAYERS["C"][0], "team_kill": None}
+    kills = pl.concat([raw.kills, pl.DataFrame([self_kill, unknown], schema=raw.kills.schema)]).sort("tick")
+    r2 = raw.__class__(**{**raw.__dict__, "kills": kills})
+    sl = RoundView.build(r2, 1).until(1700)
+    tok = players.token(sl, a_sid, a_side, FlatGeometry(), "pro", utility.tokens(sl)[0])
+    base_sl = RoundView.build(raw, 1).until(1700)
+    base_tok = players.token(base_sl, a_sid, a_side, FlatGeometry(), "pro", utility.tokens(base_sl)[0])
+    check("a self-kill and a kill with unknown team_kill do not raise kills_round",
+          tok.kills_round == base_tok.kills_round, f"{tok.kills_round} vs {base_tok.kills_round}")
+
+
+def med_10() -> None:
+    """2026-10-19 MED-10: knife skin display names mapped to weapon class unknown."""
+    from engine.state.players import weapon_class
+    names = ("Karambit", "Butterfly Knife", "M9 Bayonet", "Shadow Daggers", "weapon_knife_karambit", "Kukri Knife")
+    check("knife skins map to class knife", all(weapon_class(n) == "knife" for n in names),
+          str({n: weapon_class(n) for n in names}))
+    check("a rifle is still a rifle", weapon_class("AK-47") == "rifle")
+
+
+def med_14() -> None:
+    """2026-10-19 MED-14: a second same-tick smoke's pop/fade pointed at the first parent."""
+    import polars as pl
+    from _synthetic import make_raw_tables
+    from engine import config
+    from engine.actions import extractor
+    from engine.state.geometry import FlatGeometry
+    raw = make_raw_tables("base", 128)
+    s0 = raw.smokes.row(0, named=True)
+    twin = {**s0, "entity_id": int(s0["entity_id"]) + 1, "x": float(s0["x"]) + 300.0}
+    smokes = pl.concat([raw.smokes, pl.DataFrame([twin], schema=raw.smokes.schema)])
+    r2 = raw.__class__(**{**raw.__dict__, "smokes": smokes})
+    _, acts, _ = extractor.run(r2, config.load(), match_key="m14", geometry=FlatGeometry())
+    parents = [a for a in acts if a.type == "smoke"]
+    pops = [a for a in acts if a.type == "smoke_pop"]
+    check("two smoke parents with distinct ids", len(parents) == 2 and parents[0].action_id != parents[1].action_id)
+    check("each pop points at its own parent", sorted(p.params["parent_action_id"] for p in pops)
+          == sorted(a.action_id for a in parents), str([p.params["parent_action_id"] for p in pops]))
+    check("no stray _parent attribute survives", all(not hasattr(a, "_parent") for a in acts))
+
+
 # ── runner ────────────────────────────────────────────────────────────────────
 
-ITEMS = [crit_01, high_01, high_02, high_03, high_04, high_05, high_06, med_02, med_04, med_06]
+ITEMS = [crit_01, high_01, high_02, high_03, high_04, high_05, high_06, med_02, med_04, med_06,
+         med_07, med_08, med_09, med_10, med_14]
 
 section("audit items (docs/reviews)")
 for fn in ITEMS:

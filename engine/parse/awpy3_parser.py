@@ -134,6 +134,7 @@ QUARANTINE_REASONS = ("tick_rate_not_128", "too_few_rounds", "not_5v5", "unknown
 # Linking tolerances in seconds (converted with the demo's tick rate).
 _LINK_TOL_S   = 20.0               # grenade throw -> smoke / fire / flash detonation
 _SEGMENT_GAP  = 8                  # ticks; a gap this long in one entity slot = new grenade
+ID_SEGMENTS   = 16                 # grenade entity_id = awpy key * 16 + segment ordinal (< 16)
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────
@@ -455,7 +456,12 @@ def _remaining_flash(t: pl.DataFrame, flashes: pl.DataFrame | None, tick_rate: i
 
 def _dead_rows(t: pl.DataFrame) -> pl.DataFrame:
     """Dead players keep their rows (schema.py contract): health 0, last alive
-    position, no active weapon, empty inventory, equipment 0, not blind."""
+    position, no active weapon, empty inventory, equipment 0, not blind.
+    A snapshot table whose `health` is null on every row has no health column at all
+    (an awpy rename): refused here rather than parsed as everyone dead (MED-13)."""
+    if t.height and t["health"].null_count() == t.height:
+        raise ValueError("ticks.health is null on every row: the snapshot has no health column; "
+                         "refusing to parse every player as dead")
     alive = pl.col("is_alive")
     grp = ["round_num", "steamid"]
     t = t.sort("tick")
@@ -619,26 +625,31 @@ def _entity_key(df: pl.DataFrame) -> pl.Expr:
 def _collapse_grenades(demo, windows: pl.DataFrame) -> pl.DataFrame:
     """Trajectory rows -> one row per thrown grenade (first/last tick, last position)."""
     schema = {"entity_id": pl.Int64, "thrower_steamid": SID, "type": STR, "throw_tick": TICK,
-              "last_tick": TICK, "lx": POS, "ly": POS, "lz": POS}
+              "last_tick": TICK, "rest_tick": TICK, "lx": POS, "ly": POS, "lz": POS}
     g = _attr(demo, "grenades")
     if g is None or g.height == 0:
         return pl.DataFrame(schema=schema)
     g = g.with_columns(pl.col("tick").cast(TICK), _entity_key(g).alias("_key"),
                        _map_values(_col(g, "type", "grenade_type"), _GRENADE_TYPE_MAP).alias("_type"),
                        _col(g, "thrower_steamid", dtype=SID).alias("_thrower"))
-    g = g.sort(["_key", "tick"]).with_columns(
-        ((pl.col("_key") != pl.col("_key").shift(1))
-         | ((pl.col("tick") - pl.col("tick").shift(1)) > _SEGMENT_GAP)).fill_null(True)
-        .cum_sum().alias("_seg"))
+    new = ((pl.col("_key") != pl.col("_key").shift(1))
+           | ((pl.col("tick") - pl.col("tick").shift(1)) > _SEGMENT_GAP)).fill_null(True)
+    g = g.sort(["_key", "tick"]).with_columns(new.cum_sum().alias("_seg"),
+                                              (new.cast(pl.Int64).cum_sum().over("_key") - 1).alias("_ord"))
+    x, y, z = (_col(g, c, dtype=POS) for c in ("x", "y", "z"))
+    at_rest = (x == x.last()) & (y == y.last()) & (z == z.last())
     out = g.group_by("_seg", maintain_order=True).agg(
-        pl.col("_key").first().alias("entity_id"),
+        # one id per SEGMENT: key * 16 + ordinal, so a slot reused without a serial (or a
+        # trajectory with a hole) never shares an id with its predecessor (MED-12, 2026-10-19)
+        (pl.col("_key").first() * ID_SEGMENTS + pl.col("_ord").first().clip(upper_bound=ID_SEGMENTS - 1))
+        .alias("entity_id"),
         pl.col("_thrower").drop_nulls().first().alias("thrower_steamid"),
         pl.col("_type").drop_nulls().first().alias("type"),
         pl.col("tick").min().alias("throw_tick"),
         pl.col("tick").max().alias("last_tick"),
-        _col(g, "x", dtype=POS).last().alias("lx"),
-        _col(g, "y", dtype=POS).last().alias("ly"),
-        _col(g, "z", dtype=POS).last().alias("lz"),
+        # first tick at the final position: when a decoy came to rest (MED-08)
+        pl.col("tick").filter(at_rest).min().alias("rest_tick"),
+        x.last().alias("lx"), y.last().alias("ly"), z.last().alias("lz"),
     ).drop("_seg")
     out = _assign_round(out, windows, "throw_tick", keep_round=False)
     return out.select(list(schema)).sort("throw_tick")
@@ -704,8 +715,11 @@ def _build_utility(demo, windows: pl.DataFrame, tick_rate: int | None):
     g = g.with_columns(
         pl.when(pl.col("type").is_in(["molotov", "incendiary"]) & pl.col("_ftype").is_in(["molotov", "incendiary"]))
           .then(pl.col("_ftype")).otherwise(pl.col("type")).alias("type"),
-        pl.coalesce("start_tick", "last_tick").alias("detonate_tick"),
-        pl.col("end_tick").alias("expire_tick"),
+        # smoke / molotov: linked cloud; decoy: at rest -> removed (MED-08); flash / HE: last tick
+        pl.coalesce("start_tick",
+                    pl.when(pl.col("type") == "decoy").then(pl.coalesce("rest_tick", "last_tick"))
+                      .otherwise(pl.col("last_tick"))).alias("detonate_tick"),
+        pl.when(pl.col("type") == "decoy").then(pl.col("last_tick")).otherwise(pl.col("end_tick")).alias("expire_tick"),
         pl.coalesce("x", "lx").alias("x"), pl.coalesce("y", "ly").alias("y"),
         pl.coalesce("z", "lz").alias("z"),
     )

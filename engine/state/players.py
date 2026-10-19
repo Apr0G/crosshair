@@ -113,6 +113,12 @@ def _vocab() -> tuple[dict[str, str], dict[str, str]]:
 
 _UNMAPPED_LOGGED: set[str] = set()
 
+# Knife skin display names (`Karambit`, `Butterfly Knife`, `M9 Bayonet`, `Shadow Daggers`,
+# ...) carry no `knife` prefix; any of these words marks a knife (MED-10, 2026-10-19).
+KNIFE_WORDS = ("knife", "bayonet", "dagger", "karambit", "butterfly", "falchion", "huntsman",
+               "navaja", "stiletto", "talon", "ursus", "nomad", "paracord", "skeleton", "survival",
+               "kukri", "bowie", "gut knife", "flip knife", "classic knife")
+
 
 def short_name(name: str | None) -> str | None:
     """Canonical short name (`ak47`) of any emitted form, or None if unmapped/None."""
@@ -123,7 +129,7 @@ def short_name(name: str | None) -> str | None:
     if key in names:
         return names[key]
     bare = key[7:] if key.startswith("weapon_") else key
-    if bare.startswith(("knife", "bayonet")):
+    if bare.startswith(("knife", "bayonet")) or any(w in bare for w in KNIFE_WORDS):
         return "knife"
     return None
 
@@ -230,8 +236,11 @@ def round_kills_damage(sl, steamid: int, enemies) -> tuple[float, float]:
     kills = 0.0
     if sl.kills.n:
         att = sl.kills.col("attacker_steamid")
+        vic = sl.kills.col("victim_steamid")
         tk  = sl.kills.col("team_kill")
-        kills = float(sum(1 for a, t in zip(att, tk) if _nan(a) == steamid and _nan(t) is not True))
+        # as the parser's ticks.kills_round: another player, not a team kill, team_kill known (MED-09)
+        kills = float(sum(1 for a, v, t in zip(att, vic, tk)
+                          if _nan(a) == steamid and _nan(v) not in (None, steamid) and _nan(t) is False))
     dmg = 0.0
     if sl.damages.n:
         att = sl.damages.col("attacker_steamid")

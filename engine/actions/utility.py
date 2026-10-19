@@ -240,7 +240,22 @@ def _durative(ctx, type_: str, r: int, thrower, start: int, end_raw: int | None,
     if end < term:
         out.append(ctx.instant(r, fade_t, thrower, end, {"parent_action_id": a.action_id, **land},
                                side=a.actor_side))
+    for child in out[1:]:
+        if child is not None:
+            child._parent = a                     # resolved again after ctx.unique() (MED-14)
     return out
+
+
+def _unique(ctx, out: list, salt_of) -> list[Action]:
+    """`ctx.unique` plus the MED-14 fix: a parent salted by `unique()` has its pseudo-
+    actions' `parent_action_id` rewritten to the final id."""
+    acts = ctx.unique([a for a in out if a is not None], salt_of)
+    for a in acts:
+        parent = getattr(a, "_parent", None)
+        if parent is not None:
+            a.params["parent_action_id"] = parent.action_id
+            del a._parent
+    return acts
 
 
 def _window_rows(rows: list[dict], grenades: list[dict], ctx, start_col: str) -> list[tuple]:
@@ -278,7 +293,7 @@ def extract_smokes(raw, states, ctx) -> list[Action]:
             **_land(land),
         }
         out += _durative(ctx, "smoke", r, thrower, start, end, params)
-    return ctx.unique([a for a in out if a is not None], lambda a: a.params.get("entity_id"))
+    return _unique(ctx, out, lambda a: a.params.get("entity_id"))
 
 
 def _fire_damage(raw, ctx, r: int, thrower, start: int, end: int) -> list[dict]:
@@ -338,7 +353,7 @@ def extract_molotovs(raw, states, ctx) -> list[Action]:
         }
         sub = g["type"] if g is not None else None
         out += _durative(ctx, "molotov", r, thrower, start, end, params, subtype=sub)
-    return ctx.unique([a for a in out if a is not None], lambda a: a.params.get("entity_id"))
+    return _unique(ctx, out, lambda a: a.params.get("entity_id"))
 
 
 @register("decoy")
@@ -353,7 +368,7 @@ def extract_decoys(raw, states, ctx) -> list[Action]:
         params = {"land_callout": ctx.callout(land), "throw_tick": _int(g.get("throw_tick")),
                   "entity_id": _int(g["entity_id"]), **_land(land)}
         out += _durative(ctx, "decoy", r, thrower, start, _int(g.get("expire_tick")), params)
-    return ctx.unique([a for a in out if a is not None], lambda a: a.params.get("entity_id"))
+    return _unique(ctx, out, lambda a: a.params.get("entity_id"))
 
 
 # ── blocks_pairs_at_pop (needs snapshots) ─────────────────────────────────────

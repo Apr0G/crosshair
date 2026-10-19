@@ -105,11 +105,11 @@ are dropped; on a shared boundary tick the later round wins.
 | `kills.is_trade` (optional, schema.py `OPTIONAL_COLUMNS`) | awpy `is_trade`, kept when present |
 | `kills.team_kill` | `attacker_side == victim_side` and attacker != victim; False when there is no attacker (world damage) |
 | `damages.hitgroup` | `hitgroup_name` (fallback: `hitgroup` code as str) |
-| `grenades.entity_id` (and the linked `smokes` / `infernos` / `flashes.entity_id`) | `entity_serial * 65536 + entity_id` (awpy: slot + generation identify an entity); a slot reused without a serial is split on an 8-tick gap |
+| `grenades.entity_id` (and the linked `smokes` / `infernos` / `flashes.entity_id`) | `(entity_serial * 65536 + entity_id) * 16 + segment` (awpy: slot + generation identify an entity); a slot reused without a serial, or a trajectory with a > 8-tick hole, is split into segments that each get their own id (MED-12) |
 | `grenades.type` | `flashbang` -> `flash`; molotov vs incendiary from the linked fire's `type` when it has one |
 | `grenades.throw_tick` | first trajectory tick |
-| `grenades.detonate_tick`, `x,y,z` | smoke / molotov: linked cloud / fire `start_tick` and position; flash / HE / decoy: last trajectory tick and point |
-| `grenades.expire_tick` | smoke / molotov: linked `end_tick`; flash / HE: **null** (instant); decoy: **null** (not exposed) |
+| `grenades.detonate_tick`, `x,y,z` | smoke / molotov: linked cloud / fire `start_tick` and position; flash / HE: last trajectory tick and point; decoy: first tick at its final position (it came to rest) and that point |
+| `grenades.expire_tick` | smoke / molotov: linked `end_tick`; flash / HE: **null** (instant); decoy: last trajectory tick (the entity is removed when it stops); the state builder gives a decoy with no end its nominal 15 s (MED-08) |
 | linking | smokes / fires / blinds -> the thrower's latest grenade of the matching type thrown at or before the event, within 20 s |
 | `smokes`, `infernos` | `demo.smokes`, `demo.fires`; `infernos.extent_radius` **null** (awpy has one row per fire, no flame extents) |
 | `flashes` | `demo.blinds`: `tick` -> `detonate_tick`, `victim_steamid` -> `player_steamid`, `duration` -> `blind_duration` |

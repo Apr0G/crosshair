@@ -97,12 +97,15 @@ class FakeDemo:
         # Trajectories: smoke (slot 10, serial 1), flash (11), molotov (12) in round 1;
         # an HE reusing slot 10 with serial 2 in round 2.
         traj = []
+        # plus: a decoy (13) that flies 500-519 and rests 520-560; slot 11 reused WITHOUT a new
+        # serial after a 25-tick gap (a second flash, 420-430) -> its own segment id (MED-12)
         for eid, ser, sid, typ, t0, t1 in [(10, 1, B, "smoke", 250, 300), (11, 1, D, "flashbang", 380, 395),
-                                            (12, 1, C, "molotov", 320, 330), (10, 2, A, "he", 900, 920)]:
+                                            (12, 1, C, "molotov", 320, 330), (10, 2, A, "he", 900, 920),
+                                            (13, 1, A, "decoy", 500, 560), (11, 1, D, "flashbang", 420, 430)]:
             for t in range(t0, t1 + 1):
                 traj.append({"tick": t, "thrower_steamid": sid, "thrower_name": NAMES[sid], "thrower_side": "x",
                              "type": typ, "entity_id": eid, "entity_serial": ser,
-                             "x": float(t), "y": float(eid), "z": 5.0})
+                             "x": float(min(t, 520) if typ == "decoy" else t), "y": float(eid), "z": 5.0})
         self.grenades = pl.DataFrame(traj, schema_overrides={"thrower_steamid": pl.UInt64})
         self.smokes = pl.DataFrame({"start_tick": [301], "end_tick": [600], "thrower_steamid": [B],
                                     "thrower_name": ["bravo"], "thrower_side": [CTS], "entity_id": [10],
@@ -272,8 +275,15 @@ def test_fake(tmp: Path) -> None:
 
     section("utility")
     g = tables["grenades"].sort("throw_tick")
-    check("grenades collapsed to one row per entity", g.height == 4, f"{g.height}")
-    check("slot reuse with a new serial is a separate grenade", g["entity_id"].n_unique() == 4)
+    check("grenades collapsed to one row per entity (segment)", g.height == 6, f"{g.height}")
+    check("slot reuse with a new serial, or without one after a gap, is a separate grenade (MED-12)",
+          g["entity_id"].n_unique() == 6)
+    fl2 = g.filter(pl.col("type") == "flash").sort("throw_tick")
+    check("the two segments of slot 11 differ by their ordinal", fl2.height == 2
+          and fl2["entity_id"][1] == fl2["entity_id"][0] + 1 and fl2["entity_id"][0] % ap.ID_SEGMENTS == 0)
+    dec = g.filter(pl.col("type") == "decoy").row(0, named=True)
+    check("decoy: detonate at rest (520), expire at removal (560), position = rest point (MED-08)",
+          (dec["throw_tick"], dec["detonate_tick"], dec["expire_tick"], dec["x"]) == (500, 520, 560, 520.0), f"{dec}")
     smoke = g.filter(pl.col("type") == "smoke").row(0, named=True)
     check("smoke throw / detonate / expire",
           (smoke["throw_tick"], smoke["detonate_tick"], smoke["expire_tick"]) == (250, 301, 600), f"{smoke}")
@@ -291,7 +301,16 @@ def test_fake(tmp: Path) -> None:
     check("extent_radius null (awpy has no flame extents)", inf["extent_radius"].null_count() == inf.height)
     f = tables["flashes"]
     check("one flashes row per blinded player", f.height == 2)
-    check("flashes linked to the flash grenade", set(f["entity_id"].to_list()) == {flash["entity_id"]})
+    check("flashes linked to the flash grenade (the segment thrown before the blind)",
+          set(f["entity_id"].to_list()) == {flash["entity_id"]})
+    nohp = FakeDemo()
+    nohp_orig = nohp.snapshots
+    nohp.snapshots = lambda **kw: nohp_orig(**kw).drop("health")
+    try:
+        ap.parse(tmp / "x.dem", demo=nohp)
+        check("a snapshot table without health is refused, not parsed as all-dead (MED-13)", False, "no exception")
+    except ValueError as exc:
+        check("a snapshot table without health is refused, not parsed as all-dead (MED-13)", "health" in str(exc))
     check("blind_duration", sorted(f["blind_duration"].to_list()) == [1.0, 2.0])
 
     section("bomb")

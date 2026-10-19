@@ -40,6 +40,7 @@ import polars as pl
 
 from engine.parse.schema import RawTables
 from engine.state import context, pairwise, players, sampler, utility
+from engine.state.utility import NOMINAL_DURATION_S
 from engine.state.schema import N_PER_SIDE, Snapshot, SnapshotMeta, rows_to_frame
 
 log = logging.getLogger("engine.state.builder")
@@ -145,8 +146,12 @@ class RoundView:
         v.smokes   = raw.smokes.filter(pl.col("start_tick") >= start).sort("start_tick", maintain_order=True).to_dicts()
         v.infernos = raw.infernos.filter(pl.col("start_tick") >= start).sort("start_tick", maintain_order=True).to_dicts()
         dec = raw.grenades.filter((pl.col("type") == "decoy") & (pl.col("throw_tick") >= start))
+        nominal = int(round(NOMINAL_DURATION_S["decoy"] * v.tick_rate))
         v.decoys = [{"entity_id": g["entity_id"], "start_tick": g["detonate_tick"],
-                     "end_tick": g["expire_tick"], "throw_tick": g["throw_tick"],
+                     # a decoy with no known end runs its nominal life (MED-08): never "forever"
+                     "end_tick": g["expire_tick"] if g["expire_tick"] is not None
+                                 else (g["detonate_tick"] + nominal if g["detonate_tick"] is not None else None),
+                     "throw_tick": g["throw_tick"],
                      "x": g["x"], "y": g["y"], "z": g["z"], "thrower_steamid": g["thrower_steamid"]}
                     for g in dec.sort("throw_tick", maintain_order=True).to_dicts()]
         return v

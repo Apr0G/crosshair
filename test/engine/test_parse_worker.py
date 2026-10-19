@@ -41,6 +41,21 @@ def invalid_parse(path: Path):
     return tables, meta
 
 
+class _Panic(BaseException):
+    """Stands in for pyo3's PanicException (a BaseException, not an Exception)."""
+
+
+def panic_parse(path: Path):
+    raise _Panic("Rust panic in the parser")
+
+
+def dying_parse(path: Path):
+    import os
+    if "die" in Path(path).name:
+        os._exit(3)                                # a hard worker death breaks the pool
+    return fake_parse(path)
+
+
 def flaky_parse(path: Path):
     n = _FLAKY_CALLS[str(path)] = _FLAKY_CALLS.get(str(path), 0) + 1
     if n == 1:
@@ -160,6 +175,18 @@ def test_smoke(tmp: Path) -> None:
     check("smoke writes no parquet", not out_dir.exists() or not list(out_dir.rglob("*.parquet")))
 
 
+def test_robust(tmp: Path) -> None:
+    section("panics and dead workers are failures, not aborts (MED-11)")
+    demos = make_demos(tmp / "rdemos", ["ok.dem", "die.dem", "p.dem"])
+    r = worker.parse_one(demos / "p.dem", tmp / "rparsed", panic_parse, header_fn=fake_header)
+    check("a BaseException from the parser is a failed result", r["status"] == "failed" and r["exc_type"] == "_Panic")
+    out = worker.run(demos, out_dir=tmp / "rparsed2", procs=2, parser=dying_parse, header_fn=fake_header)
+    by = {x["match_key"]: x for x in out["results"]}
+    check("a worker that dies hard: its demo is failed, the others still parse or fail, run() returns",
+          set(by) == {"ok", "die", "p"} and by["die"]["status"] == "failed", str(out["counts"]))
+    check("failure log written after a broken pool", (tmp / "rparsed2" / worker.FAILURES_NAME).is_file())
+
+
 def test_pool(tmp: Path) -> None:
     section("process pool")
     demos = make_demos(tmp / "pdemos", ["p1.dem", "p2.dem", "p3.dem"])
@@ -175,6 +202,7 @@ def main() -> int:
         test_failures(tmp)
         test_smoke(tmp)
         test_quarantine(tmp)
+        test_robust(tmp)
         test_pool(tmp)
     return summary()
 
