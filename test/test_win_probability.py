@@ -15,25 +15,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from _harness import check, summary
+from db import DB_PATH
 from win_probability import predict, predict_batch, FEATURES, MODEL_PATH
 
+
 # ── helpers ───────────────────────────────────────────────────────────────────
-
-PASS = "\033[32m✓\033[0m"
-FAIL = "\033[31m✗\033[0m"
-
-_results: list[tuple[bool, str]] = []
-
-
-def check(desc: str, condition: bool, detail: str = ""):
-    ok = bool(condition)
-    tag = PASS if ok else FAIL
-    msg = f"  {tag}  {desc}"
-    if detail:
-        msg += f"  ({detail})"
-    print(msg)
-    _results.append((ok, desc))
-
 
 def between(v: float, lo: float, hi: float) -> bool:
     return lo <= v <= hi
@@ -208,19 +196,7 @@ def main() -> int:
     print("\n── Calibration ──────────────────────────────────────────────────────────")
     _check_calibration()
 
-    # ── summary ───────────────────────────────────────────────────────────────
-    passed = sum(1 for ok, _ in _results if ok)
-    total  = len(_results)
-    failed = [desc for ok, desc in _results if not ok]
-
-    print(f"\n{'─'*60}")
-    print(f"  {passed}/{total} passed")
-    if failed:
-        print("  Failed:")
-        for d in failed:
-            print(f"    - {d}")
-    print()
-    return 0 if not failed else 1
+    return summary()
 
 
 def _check_calibration(n_bins: int = 10, tolerance: float = 0.10):
@@ -232,12 +208,11 @@ def _check_calibration(n_bins: int = 10, tolerance: float = 0.10):
     compares each bin's predicted mean against the observed CT win rate.
     """
     import sqlite3
-    db_path = Path(__file__).parent.parent / "data" / "crosshair.db"
-    if not db_path.exists():
+    if not DB_PATH.exists():
         check("calibration: reliability within tolerance", True, "skipped — no database")
         return
 
-    con = sqlite3.connect(db_path)
+    con = sqlite3.connect(DB_PATH)
     try:
         cols = ", ".join(FEATURES)
         rows = con.execute(

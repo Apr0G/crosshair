@@ -13,27 +13,20 @@ These paths run for the first time on a real scrape, so they get tested here
 rather than discovered at hour three of an overnight run.
 """
 import gzip
-import io
 import socket
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-PASS = "\033[32m✓\033[0m"
-FAIL = "\033[31m✗\033[0m"
-_results: list[tuple[bool, str]] = []
+from _harness import check, summary
 
 SECRET = "SUPERSECRETSIGNATURE123"
 DEMO_MAGIC = b"PBDEMS2\x00"          # CS2 demo header
 BODY_RAW = DEMO_MAGIC + b"\x00" * 4000
-
-
-def check(desc: str, ok: bool, detail: str = ""):
-    _results.append((bool(ok), desc))
-    print(f"  {PASS if ok else FAIL}  {desc}" + (f"  ({detail})" if detail else ""))
 
 
 # ── a tiny server that can misbehave on demand ────────────────────────────────
@@ -88,9 +81,7 @@ def main() -> int:
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{port}"
 
-    tmp = Path("/tmp/ch_dl_test"); tmp.mkdir(exist_ok=True)
-    for f in tmp.glob("*"):
-        f.unlink()
+    tmp = Path(tempfile.mkdtemp(prefix="ch_dl_test_"))
 
     def dl(route: str, name: str, query: str = ""):
         return scraper.download_demo(f"{base}{route}{query}", tmp / name)
@@ -192,15 +183,7 @@ def main() -> int:
     finally:
         srv.shutdown()
 
-    passed = sum(1 for ok, _ in _results if ok)
-    failed = [d for ok, d in _results if not ok]
-    print(f"\n{'─'*60}\n  {passed}/{len(_results)} passed")
-    if failed:
-        print("  Failed:")
-        for d in failed:
-            print(f"    - {d}")
-    print()
-    return 0 if not failed else 1
+    return summary()
 
 
 if __name__ == "__main__":

@@ -3,20 +3,15 @@ Win-probability model (LightGBM, binary classification).
 
 Predicts P(CT wins this round | current state).
 
-Training data is every row in `round_states` (~1.2 M samples). The split is by
-match_id (GroupShuffleSplit) — splitting randomly across rows would leak future
-state from a round into training and inflate AUC dramatically.
-
-Realistic generalisation: AUC ≈ 0.90 on held-out matches.
+Training data is the ~1 Hz grid in `round_states`. The split is by match_id
+(GroupShuffleSplit) — splitting randomly across rows would leak future state from a
+round into training and inflate AUC dramatically. Trained via `main.py train`.
 """
-import argparse
-import sqlite3
 import numpy as np
 import pandas as pd
-from pathlib import Path
+import sqlite3
 
-DB_PATH    = Path(__file__).parent.parent / "data" / "crosshair.db"
-MODEL_PATH = Path(__file__).parent.parent / "data" / "win_prob.lgb"
+from db import DB_PATH, MODEL_PATH
 
 FEATURES = [
     "time_into_round_s",
@@ -148,7 +143,10 @@ def train(eval: bool = False):
     return model
 
 
+# ── inference ─────────────────────────────────────────────────────────────────
+
 _model = None
+
 
 def load_model():
     global _model
@@ -161,7 +159,7 @@ def load_model():
 
 
 def predict(state: dict) -> float:
-    return float(load_model().predict(_state_to_row(state))[0])
+    return float(load_model().predict(_states_to_frame([state]))[0])
 
 
 def predict_batch(states: list[dict]) -> np.ndarray:
@@ -189,19 +187,3 @@ def _states_to_frame(states: list[dict]) -> pd.DataFrame:
         if col != "map" and df[col].dtype == object:
             df[col] = df[col].astype(float)
     return df
-
-
-def _state_to_row(state: dict) -> pd.DataFrame:
-    return _states_to_frame([state])
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--train", action="store_true")
-    parser.add_argument("--eval",  action="store_true")
-    args = parser.parse_args()
-
-    if args.train:
-        train(eval=args.eval)
-    else:
-        parser.print_help()

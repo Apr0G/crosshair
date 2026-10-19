@@ -9,10 +9,11 @@ no test at all. They read source text rather than importing the modules, so they
 even when the venv has no third-party packages installed.
 
 Covers:
-  P8  feature parity   — FEATURES ⊆ round_states columns ⊆ insert_round_states params
+  P8  feature parity   — FEATURES ⊆ round_states columns ⊆ store_match's insert params
   P9  schema integrity — every column a writer/reader references exists in _init_schema
   P4  source interface — scraper and faceit_api expose the same two functions
   P1  dedup            — both id forms (<mid> and <mid>_m1) are checked in both sources
+  P10 host allowlist + credential redaction
 """
 import ast
 import re
@@ -21,30 +22,17 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from _harness import check, skip, summary
+
 ROOT = Path(__file__).parent.parent
 SRC  = ROOT / "src"
 DB   = ROOT / "data" / "crosshair.db"
-
-PASS = "\033[32m✓\033[0m"
-FAIL = "\033[31m✗\033[0m"
-SKIP = "\033[33m–\033[0m"
-
-_results: list[tuple[bool, str]] = []
-
-
-def check(desc: str, ok: bool, detail: str = ""):
-    _results.append((bool(ok), desc))
-    print(f"  {PASS if ok else FAIL}  {desc}" + (f"  ({detail})" if detail else ""))
-
-
-def skip(desc: str, why: str):
-    print(f"  {SKIP}  {desc}  (skipped — {why})")
 
 
 # ── source parsing ────────────────────────────────────────────────────────────
 
 def _src(name: str) -> str:
-    return (SRC / name).read_text()
+    return (SRC / name).read_text(encoding="utf-8")
 
 
 def create_table_columns(sql_text: str, table: str) -> set[str]:
@@ -116,12 +104,12 @@ def main() -> int:
     check("every FEATURE exists as a round_states column",
           features <= schema_states,
           f"missing: {sorted(features - schema_states)}")
-    check("every FEATURE is actually written by insert_round_states",
+    check("every FEATURE is actually written by store_match",
           features <= ins_states,
           f"missing: {sorted(features - ins_states)}")
 
-    # The sampler builds its dict literal inline; check the keys it emits.
-    emitted = set(re.findall(r'"([a-z0-9_]+)":\s', ss_src.split("states.append({")[-1]))
+    # build_state returns its dict literal inline; check the keys it emits.
+    emitted = set(re.findall(r'"([a-z0-9_]+)":\s', ss_src.split("def build_state(")[-1]))
     if emitted:
         # `map` comes from the caller's argument and `state_kind` is stamped by the
         # sampler after build_state returns — neither is in the dict literal.
@@ -180,16 +168,16 @@ def main() -> int:
     print("\n── P10: credential redaction ────────────────────────────────────────────")
     # urllib3 puts "path?query" — not the full URL — into connection-level errors, so a
     # literal replace of the known URL never matches. Every print/exception path that
-    # can carry a signed FACEIT URL must survive these.
-    pl_src = _src("pipeline.py")
+    # can carry a signed FACEIT URL must survive these. redact_url lives in scraper
+    # (pipeline imports it); redact_text in pipeline.
     ns2: dict = {"urlsplit": urlsplit, "urlunsplit": urlunsplit, "re": re}
-    tree2 = ast.parse(pl_src)
-    for node in tree2.body:
-        if isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == "_QUERY_RE" for t in node.targets):
-            exec(compile(ast.Module([node], []), "<x>", "exec"), ns2)
-        if isinstance(node, ast.FunctionDef) and node.name in ("redact_url", "redact_text"):
-            exec(compile(ast.Module([node], []), "<x>", "exec"), ns2)
+    for fname, wanted in (("scraper.py", ("redact_url",)), ("pipeline.py", ("redact_text",))):
+        for node in ast.parse(_src(fname)).body:
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "_QUERY_RE" for t in node.targets):
+                exec(compile(ast.Module([node], []), "<x>", "exec"), ns2)
+            if isinstance(node, ast.FunctionDef) and node.name in wanted:
+                exec(compile(ast.Module([node], []), "<x>", "exec"), ns2)
     rt, ru = ns2.get("redact_text"), ns2.get("redact_url")
     if not (rt and ru):
         skip("credential redaction", "could not extract redact_text/redact_url")
@@ -217,7 +205,7 @@ def main() -> int:
             live_events = {r[1] for r in con.execute("PRAGMA table_info(events)")}
         finally:
             con.close()
-        check("live round_states has every column insert_round_states writes",
+        check("live round_states has every column store_match writes",
               ins_states <= live_states,
               f"missing: {sorted(ins_states - live_states)}")
         check("live events has every column score_impact writes",
@@ -227,16 +215,7 @@ def main() -> int:
               features <= live_states,
               f"missing: {sorted(features - live_states)}")
 
-    passed = sum(1 for ok, _ in _results if ok)
-    failed = [d for ok, d in _results if not ok]
-    print(f"\n{'─'*60}")
-    print(f"  {passed}/{len(_results)} passed")
-    if failed:
-        print("  Failed:")
-        for d in failed:
-            print(f"    - {d}")
-    print()
-    return 0 if not failed else 1
+    return summary()
 
 
 if __name__ == "__main__":

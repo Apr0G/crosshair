@@ -258,53 +258,6 @@ def _weights(holders, actions, delta, lo, wp_of_state, apply_delta, state_at):
     return [x + gap / n for x in shares], "shapley"
 
 
-def _overlaps(w1, w2) -> bool:
-    return w1 is not None and w2 is not None and w1[0] < w2[1] and w2[0] < w1[1]
-
-
-def _split_simultaneous(group, before, after, wp_of_state, apply_delta, state_at, tick):
-    """Marginal contribution per action for actions resolving on the same tick.
-
-    With state hooks available this is the exact Shapley value: the average marginal
-    contribution over every ordering, which removes the arbitrariness of picking one.
-    Without them, an equal split — which IS the Shapley value when the actions are
-    exchangeable.
-    """
-    joint = after - before
-    n = len(group)
-    can_shapley = (wp_of_state is not None and apply_delta is not None
-                   and state_at is not None and n <= MAX_EXACT_SHAPLEY
-                   and all(a.state_delta is not None for a in group))
-    if not can_shapley:
-        return [joint / n] * n
-
-    base = state_at(tick - 1)
-    if base is None:
-        return [joint / n] * n
-
-    totals = {a.event_id: 0.0 for a in group}
-    orders = list(permutations(range(n)))
-    for order in orders:
-        state = base
-        prev  = wp_of_state(state)
-        for idx in order:
-            state = apply_delta(state, group[idx].state_delta)
-            cur   = wp_of_state(state)
-            totals[group[idx].event_id] += cur - prev
-            prev = cur
-    shares = [totals[a.event_id] / len(orders) for a in group]
-
-    # Shapley is efficient by construction, but the model is not linear in the
-    # state, so the sum of marginals need not equal the observed joint jump.
-    # Rescale onto the real jump so the round still conserves.
-    s = sum(shares)
-    if abs(s) > 1e-12:
-        shares = [x * joint / s for x in shares]
-    else:
-        shares = [joint / n] * n
-    return shares
-
-
 # ── terminal states ───────────────────────────────────────────────────────────
 
 def terminal_wp(state: dict) -> float | None:

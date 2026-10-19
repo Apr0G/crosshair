@@ -18,7 +18,6 @@ Required in .env:
     FACEIT_API_KEY   (Data API key; must also be granted Downloads access)
 """
 
-import os
 import time
 import requests
 from pathlib import Path
@@ -27,13 +26,6 @@ import scraper
 from db import is_processed
 
 DOWNLOADS_URL = "https://open.faceit.com/download/v2/demos/download"
-
-
-def _bearer() -> dict:
-    key = os.getenv("FACEIT_API_KEY")
-    if not key:
-        raise EnvironmentError("FACEIT_API_KEY not set")
-    return {"Authorization": f"Bearer {key}"}
 
 
 # ── Match discovery (same criteria as the Playwright path) ────────────────────
@@ -139,7 +131,7 @@ def _signed_url(resource_url: str, max_retries: int = 4) -> str:
     for attempt in range(max_retries):
         resp = requests.post(
             DOWNLOADS_URL,
-            headers={**_bearer(), "Content-Type": "application/json"},
+            headers={**scraper._api_headers(), "Content-Type": "application/json"},
             json={"resource_url": resource_url},
             timeout=30,
         )
@@ -174,6 +166,13 @@ def _signed_url(resource_url: str, max_retries: int = 4) -> str:
     )
 
 
+def _is_denied(err: Exception) -> bool:
+    """scraper.download_demo reports a bad status as IOError("HTTP <code> fetching …")
+    rather than requests.HTTPError, so the signed URL never leaks through the
+    exception. 401/403 there means the short-lived signature has expired."""
+    return str(err).startswith(("HTTP 401 ", "HTTP 403 "))
+
+
 def download_demo(resource_url: str, dest: Path) -> Path:
     """
     Two-step FACEIT download: exchange the resource URL for a fresh signed URL,
@@ -184,9 +183,8 @@ def download_demo(resource_url: str, dest: Path) -> Path:
         signed = _signed_url(resource_url)
         try:
             return scraper.download_demo(signed, dest)
-        except requests.HTTPError as e:
-            expired = e.response is not None and e.response.status_code in (401, 403)
-            if attempt == 0 and expired:
+        except IOError as e:
+            if attempt == 0 and _is_denied(e):
                 print("    signed URL expired/denied, re-exchanging ...")
                 continue
             raise

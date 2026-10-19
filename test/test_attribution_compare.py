@@ -75,28 +75,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import numpy as np
 import pandas as pd
 
+from _harness import check, summary
 from attribution import attribute_round, KIND_INSTANT
+from db import DB_PATH as DB, MODEL_PATH
 # Both paths come from production, not from a local re-implementation: score_match's
 # bracketing helper for the grid, and the same _wp_path / _actions_for_round that
 # score_match_event uses for the event method. If either drifts, this drifts with it.
 from score_impact import (_actions_for_round, _impact_for_event, _score_states,
                           _wp_path)
-from win_probability import MODEL_PATH
-
-DB   = Path(__file__).parent.parent / "data" / "crosshair.db"
-PASS = "\033[32m✓\033[0m"
-FAIL = "\033[31m✗\033[0m"
 
 GRID, EVENT = "grid", "event"
 METHODS     = (GRID, EVENT)
 TOL         = 12          # decimals at which two impacts count as "identical"
-
-_results: list[tuple[bool, str]] = []
-
-
-def check(desc: str, ok: bool, detail: str = ""):
-    _results.append((bool(ok), desc))
-    print(f"  {PASS if ok else FAIL}  {desc}" + (f"  ({detail})" if detail else ""))
 
 
 # ── accumulators ──────────────────────────────────────────────────────────────
@@ -558,15 +548,7 @@ def main() -> int:
           f"unscored {total_ev - e.n_scored:,} = {unvalued:,} named dispositions "
           f"+ {unknown_side:,} with an unusable side")
 
-    passed = sum(1 for ok, _ in _results if ok)
-    failed = [d for ok, d in _results if not ok]
-    print(f"\n{'─'*60}\n  {passed}/{len(_results)} passed")
-    if failed:
-        print("  Failed:")
-        for d in failed:
-            print(f"    - {d}")
-    print()
-    return 0 if not failed else 1
+    return summary()
 
 
 if __name__ == "__main__":

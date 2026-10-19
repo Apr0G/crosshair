@@ -5,18 +5,27 @@ Three tables:
   processed_matches — dedup index of match_ids that have been parsed
   events            — every player action (kill, util throw, buy, rotation, bomb)
                       with WP-before / WP-after / impact filled by score_impact.py
-  round_states      — periodic team-state snapshots (~1 Hz) used to train the WP model
+  round_states      — team-state snapshots: the ~1 Hz grid the WP model trains on,
+                      plus `boundary` rows around instantaneous actions for attribution
+
+Every write goes through store_match(), which is ONE transaction per match.
+Importing this module needs only the stdlib; numpy is loaded lazily when a row is
+encoded, so `main.py status` and the schema tests run on a bare interpreter.
 """
-import sqlite3
 import json
-import numpy as np
+import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "data" / "crosshair.db"
+ROOT       = Path(__file__).parent.parent
+DATA_DIR   = ROOT / "data"
+DB_PATH    = DATA_DIR / "crosshair.db"
+MODEL_PATH = DATA_DIR / "win_prob.lgb"
 
 
 class _Encoder(json.JSONEncoder):
+    """numpy scalars/arrays leak into the event blobs; json can't serialise them."""
     def default(self, obj):
+        import numpy as np
         if isinstance(obj, np.bool_):    return bool(obj)
         if isinstance(obj, np.integer):  return int(obj)
         if isinstance(obj, np.floating): return float(obj)
@@ -27,6 +36,8 @@ class _Encoder(json.JSONEncoder):
 def _dumps(obj) -> str:
     return json.dumps(obj, cls=_Encoder)
 
+
+# ── schema ────────────────────────────────────────────────────────────────────
 
 SCHEMA_VERSION = 2
 
@@ -55,57 +66,6 @@ _MIGRATIONS: list[tuple[int, list[str]]] = [
 
 STATE_GRID     = "grid"       # the ~1 Hz training sample
 STATE_BOUNDARY = "boundary"   # tick±1 around an instantaneous action
-
-
-def _conn() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH, timeout=30)
-    c.row_factory = sqlite3.Row
-    # busy_timeout MUST be set before anything that takes a lock. journal_mode=WAL
-    # needs an exclusive lock, so with the timeout set afterwards it failed instantly
-    # the moment two ingest workers opened the DB at once ("database is locked").
-    c.execute("PRAGMA busy_timeout=30000")
-    # WAL is persistent, so only pay for the exclusive lock when it isn't already on.
-    # It lets `score`/`train` read while a scrape writes; without it a reader blocks
-    # the writer, whose insert then fails mid-match and leaves rows with no marker.
-    try:
-        if (c.execute("PRAGMA journal_mode").fetchone()[0] or "").lower() != "wal":
-            c.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.OperationalError:
-        # Another process is mid-switch; it will land in WAL either way.
-        pass
-    # Key off the tables, not the file: score_impact's sqlite3.connect creates an
-    # empty file, after which a file-existence check would skip init forever.
-    have_tables = c.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='processed_matches'"
-    ).fetchone() is not None
-    if not have_tables:
-        _init_schema(c)
-        c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        c.commit()
-    else:
-        _migrate(c)
-    return c
-
-
-def _migrate(c: sqlite3.Connection):
-    """Apply any additive migrations this DB has not seen. Safe to run every open."""
-    version = c.execute("PRAGMA user_version").fetchone()[0]
-    if version >= SCHEMA_VERSION:
-        return
-    for target, statements in _MIGRATIONS:
-        if target <= version:
-            continue
-        for stmt in statements:
-            try:
-                c.execute(stmt)
-            except sqlite3.OperationalError as e:
-                # Column already present (added out of band before this ran).
-                if "duplicate column" not in str(e).lower():
-                    raise
-        c.execute(f"PRAGMA user_version = {target}")
-        print(f"[db] migrated schema → v{target}")
-    c.commit()
 
 
 def _init_schema(c: sqlite3.Connection):
@@ -188,16 +148,70 @@ def _init_schema(c: sqlite3.Connection):
         -- (round_num, time_into_round_s); a match_id-only index forces a temp b-tree.
         CREATE INDEX IF NOT EXISTS idx_states_match_order
             ON round_states(match_id, round_num, time_into_round_s);
+        CREATE INDEX IF NOT EXISTS idx_states_kind ON round_states(state_kind);
     """)
 
 
-def init_db():
-    c = _conn()
-    try:
-        _init_schema(c)
-    finally:
-        c.close()
+def _migrate(c: sqlite3.Connection):
+    """Apply any additive migrations this DB has not seen. Safe to run every open."""
+    version = c.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
+    for target, statements in _MIGRATIONS:
+        if target <= version:
+            continue
+        for stmt in statements:
+            try:
+                c.execute(stmt)
+            except sqlite3.OperationalError as e:
+                # Column already present (added out of band before this ran).
+                if "duplicate column" not in str(e).lower():
+                    raise
+        c.execute(f"PRAGMA user_version = {target}")
+        print(f"[db] migrated schema → v{target}")
+    c.commit()
 
+
+# ── connections ───────────────────────────────────────────────────────────────
+
+def _conn() -> sqlite3.Connection:
+    """Open the DB, creating the schema on a fresh file and migrating an old one."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(DB_PATH, timeout=30)
+    c.row_factory = sqlite3.Row
+    # busy_timeout MUST be set before anything that takes a lock. journal_mode=WAL
+    # needs an exclusive lock, so with the timeout set afterwards it failed instantly
+    # the moment two ingest workers opened the DB at once ("database is locked").
+    c.execute("PRAGMA busy_timeout=30000")
+    # WAL is persistent, so only pay for the exclusive lock when it isn't already on.
+    # It lets `score`/`train` read while a scrape writes; without it a reader blocks
+    # the writer, whose insert then fails mid-match and leaves rows with no marker.
+    try:
+        if (c.execute("PRAGMA journal_mode").fetchone()[0] or "").lower() != "wal":
+            c.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        # Another process is mid-switch; it will land in WAL either way.
+        pass
+    # Key off the tables, not the file: a bare sqlite3.connect elsewhere creates an
+    # empty file, after which a file-existence check would skip init forever.
+    have_tables = c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='processed_matches'"
+    ).fetchone() is not None
+    if not have_tables:
+        _init_schema(c)
+        c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        c.commit()
+    else:
+        _migrate(c)
+    return c
+
+
+def init_db():
+    """Create or migrate the schema up front, so parallel workers don't race on it."""
+    _conn().close()
+
+
+# ── reads ─────────────────────────────────────────────────────────────────────
 
 def is_processed(match_id: str) -> bool:
     c = _conn()
@@ -210,65 +224,22 @@ def is_processed(match_id: str) -> bool:
         c.close()
 
 
-def mark_processed(match_id: str, map_name: str = None, demo_url: str = None):
+def stats() -> dict:
     c = _conn()
     try:
-        c.execute(
-            "INSERT OR IGNORE INTO processed_matches (match_id, map, demo_url) VALUES (?, ?, ?)",
-            (match_id, map_name, demo_url)
-        )
-        c.commit()
+        return {
+            "matches_processed": c.execute("SELECT COUNT(*) FROM processed_matches").fetchone()[0],
+            "total_events":      c.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+            "total_states":      c.execute("SELECT COUNT(*) FROM round_states").fetchone()[0],
+            "events_by_type":    dict(c.execute(
+                "SELECT event_type, COUNT(*) FROM events GROUP BY event_type"
+            ).fetchall()),
+        }
     finally:
         c.close()
 
 
-def store_match(match_id: str, events: list[dict], states: list[dict],
-                map_name: str = None, demo_url: str = None) -> None:
-    """Write one match's events, states and processed marker in ONE transaction.
-
-    The three used to be separate connections committing independently, and
-    insert_events committed every 500 rows — so any failure after the first batch
-    left committed rows with no processed_matches marker, and the next run
-    re-inserted the whole match. Nothing detected that: dedup is check-then-act and
-    events/round_states have no uniqueness constraint.
-    """
-    c = _conn()
-    try:
-        c.execute("BEGIN IMMEDIATE")
-        # Replace rather than append, so re-processing a match is idempotent even if
-        # a previous attempt died partway through.
-        c.execute("DELETE FROM events       WHERE match_id = ?", (match_id,))
-        c.execute("DELETE FROM round_states WHERE match_id = ?", (match_id,))
-        if events:
-            c.executemany(_EVENTS_SQL, [_event_params(e) for e in events])
-        if states:
-            c.executemany(_STATES_SQL, [_state_params(s) for s in states])
-        c.execute(
-            "INSERT OR REPLACE INTO processed_matches (match_id, map, demo_url) VALUES (?, ?, ?)",
-            (match_id, map_name, demo_url),
-        )
-        c.commit()
-        print(f"  stored {len(events)} events + {len(states)} states (one transaction)", flush=True)
-    except Exception:
-        c.rollback()
-        raise
-    finally:
-        c.close()
-
-
-def _event_params(e: dict) -> dict:
-    return {**e,
-            "situation": _dumps(e.get("situation", {})),
-            "action":    _dumps(e.get("action",    {})),
-            "outcome":   _dumps(e.get("outcome",   {}))}
-
-
-def _state_params(s: dict) -> dict:
-    return {**s,
-            "state_kind":         s.get("state_kind", STATE_GRID),
-            "active_smokes_xy":   _dumps(s.get("active_smokes_xy",   [])),
-            "active_infernos_xy": _dumps(s.get("active_infernos_xy", []))}
-
+# ── writes ────────────────────────────────────────────────────────────────────
 
 _EVENTS_SQL = """
         INSERT INTO events
@@ -305,44 +276,46 @@ _STATES_SQL = """
     """
 
 
-# Kept for callers that write only one side (e.g. ad-hoc scripts). The pipeline uses
-# store_match, which is transactional — prefer that.
-def insert_events(events: list[dict], batch_size: int = 500):
-    if not events:
-        return
+def _event_params(e: dict) -> dict:
+    return {**e,
+            "situation": _dumps(e.get("situation", {})),
+            "action":    _dumps(e.get("action",    {})),
+            "outcome":   _dumps(e.get("outcome",   {}))}
+
+
+def _state_params(s: dict) -> dict:
+    return {**s,
+            "state_kind":         s.get("state_kind", STATE_GRID),
+            "active_smokes_xy":   _dumps(s.get("active_smokes_xy",   [])),
+            "active_infernos_xy": _dumps(s.get("active_infernos_xy", []))}
+
+
+def store_match(match_id: str, events: list[dict], states: list[dict],
+                map_name: str = None, demo_url: str = None) -> None:
+    """Write one match's events, states and processed marker in ONE transaction.
+
+    Replace rather than append, so re-processing a match is idempotent even if a
+    previous attempt died partway through. Dedup is check-then-act and the row
+    tables have no uniqueness constraint, so this is the only thing standing between
+    a crash and a double-inserted match.
+    """
     c = _conn()
     try:
-        for i in range(0, len(events), batch_size):
-            c.executemany(_EVENTS_SQL, [_event_params(e) for e in events[i:i + batch_size]])
-            c.commit()
-            print(f"  stored {min(i + batch_size, len(events))}/{len(events)} events", flush=True)
-    finally:
-        c.close()
-
-
-def insert_round_states(states: list[dict], batch_size: int = 500):
-    if not states:
-        return
-    c = _conn()
-    try:
-        for i in range(0, len(states), batch_size):
-            c.executemany(_STATES_SQL, [_state_params(s) for s in states[i:i + batch_size]])
-            c.commit()
-            print(f"  stored {min(i + batch_size, len(states))}/{len(states)} round states", flush=True)
-    finally:
-        c.close()
-
-
-def stats() -> dict:
-    c = _conn()
-    try:
-        return {
-            "matches_processed": c.execute("SELECT COUNT(*) FROM processed_matches").fetchone()[0],
-            "total_events":      c.execute("SELECT COUNT(*) FROM events").fetchone()[0],
-            "total_states":      c.execute("SELECT COUNT(*) FROM round_states").fetchone()[0],
-            "events_by_type":    dict(c.execute(
-                "SELECT event_type, COUNT(*) FROM events GROUP BY event_type"
-            ).fetchall()),
-        }
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("DELETE FROM events       WHERE match_id = ?", (match_id,))
+        c.execute("DELETE FROM round_states WHERE match_id = ?", (match_id,))
+        if events:
+            c.executemany(_EVENTS_SQL, [_event_params(e) for e in events])
+        if states:
+            c.executemany(_STATES_SQL, [_state_params(s) for s in states])
+        c.execute(
+            "INSERT OR REPLACE INTO processed_matches (match_id, map, demo_url) VALUES (?, ?, ?)",
+            (match_id, map_name, demo_url),
+        )
+        c.commit()
+        print(f"  stored {len(events)} events + {len(states)} states (one transaction)", flush=True)
+    except Exception:
+        c.rollback()
+        raise
     finally:
         c.close()

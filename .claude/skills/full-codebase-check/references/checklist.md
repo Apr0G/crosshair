@@ -34,21 +34,19 @@ line, against the sections below. Findings almost always come from the second pa
 These come from `CLAUDE.md`. A violation is at minimum HIGH, even with no exploit path,
 because each one silently corrupts data or invalidates model numbers.
 
-- [ ] **P1 — no double-insert.** Trace every path that reaches `db.insert_events` /
-      `insert_round_states` / `mark_processed`. Is `is_processed` checked before *every*
-      one? Is it checked for **both** `<mid>` and `<mid>_m1` forms? Is there a window
-      between the check and the insert where a crash leaves events written but the match
-      unmarked? (Look hard at ordering: events inserted → crash → `mark_processed` never
-      runs → next run re-inserts everything. This is the single most likely real bug in
-      the repo.)
+- [ ] **P1 — no double-insert.** Trace every path that reaches `db.store_match`. Is
+      `is_processed` checked before *every* one? Is it checked for **both** `<mid>` and
+      `<mid>_m1` forms? `store_match` is one transaction that DELETEs the match's rows
+      and re-inserts them with the marker — confirm nothing writes to `events` /
+      `round_states` outside it, and that the transaction still covers all three tables.
 - [ ] **P1b —** is there a uniqueness constraint backing the dedup, or is it check-then-act
       only? What happens if the same `match_id` is inserted twice?
 - [ ] **P2 — source parity.** Do `scraper` and `faceit_api` produce the same `match_id`
       shape, the same decompression result, the same `demo_url` recorded? Any divergence
       means the two paths write different rows.
-- [ ] **P3 — the seam.** Does anything bypass `pipeline.process_one` to write to the DB?
-      (`test/test_local_demo.py` and `main.cmd_demo` both write directly — are they
-      consistent with the seam's behaviour, especially dedup and `mark_processed`?)
+- [ ] **P3 — the seam.** Does anything bypass `pipeline.ingest_demo` to write to the DB?
+      (`process_one` and `main.cmd_demo` must both end there; `test/test_local_demo.py`
+      must not write at all.)
 - [ ] **P4 — source interface.** Do both source modules expose exactly
       `iter_unprocessed_demos(...)` and `download_demo(url, dest)` with compatible
       signatures? Does `pipeline` call anything else on them?
@@ -61,7 +59,7 @@ because each one silently corrupts data or invalidates model numbers.
 - [ ] **P7 — calibration.** Any change to objective, class weights, or post-processing that
       would break calibration while leaving AUC fine?
 - [ ] **P8 — feature parity.** Cross-check three lists: what `state_sampler` emits, what
-      `db.insert_round_states` writes, and `win_probability.FEATURES`. Any feature in
+      `db._STATES_SQL` binds, and `win_probability.FEATURES`. Any feature in
       `FEATURES` that the DB lacks fails at query time; any column the sampler emits that
       the insert omits is silently dropped.
 - [ ] **P9 — additive-only schema.** Does `_init_schema` match what the writers insert?
@@ -162,14 +160,14 @@ Everything arriving from FACEIT or a demo file is untrusted, however friendly th
 - [ ] Are `p_before` / `p_after` / `impact` in `_init_schema`? Compare `_init_schema`
       against every column any writer or reader references. A fresh DB that cannot run
       `status` or `score` is a HIGH.
-- [ ] Transactions: `insert_events` commits per batch. If batch 3 of 6 fails, the DB holds
-      a partially-inserted match with **no** `processed_matches` row. Next run re-inserts
-      batches 1–2. Trace this. It is P1.
-- [ ] Connection lifecycle: `_conn()` opens a new connection per call, and `insert_events`
-      / `insert_round_states` / `is_processed` / `mark_processed` each open their own.
-      Correctness first, performance second.
-- [ ] `_conn()` only calls `_init_schema` when the file is **absent** — so a DB created by
-      an older version never gains new columns. Confirm and report.
+- [ ] Transactions: `store_match` must stay ONE transaction (BEGIN IMMEDIATE … commit)
+      covering the deletes, both inserts and the processed marker. Any new write path that
+      commits in pieces reopens the partial-match / re-insert window. It is P1.
+- [ ] Connection lifecycle: `_conn()` opens a new connection per call and runs the
+      migration check every time. Correctness first, performance second.
+- [ ] Migrations: every new column must appear in BOTH `_init_schema` and `_MIGRATIONS`
+      with `SCHEMA_VERSION` bumped — `CREATE TABLE IF NOT EXISTS` alone never changes an
+      existing DB. `test/test_db.py` migrates a v0 database; keep it passing.
 - [ ] Indexes vs actual query patterns: `score_impact` filters `round_states` by `match_id`
       and orders by `round_num, time_into_round_s`. Is that index adequate?
 - [ ] `sqlite3` `timeout=` values, and whether a `database is locked` error is handled.
@@ -213,7 +211,7 @@ Everything arriving from FACEIT or a demo file is untrusted, however friendly th
 - [ ] Leakage beyond the split (P6): any feature computed from the round's outcome, or from
       state after the event being scored.
 - [ ] `df["map"].astype("category")` — categories are fitted on whatever data is present.
-      At `predict` time `_state_to_row` builds a **single-row** categorical, so its category
+      At `predict` time `_states_to_frame` builds a **single-row** categorical, so its category
       set differs from training. Does LightGBM map it by code or by label? A mismatch means
       every prediction uses the wrong map. **Verify against LightGBM's actual behaviour, not
       assumption.** This is a plausible CRITICAL-for-correctness.
@@ -236,8 +234,8 @@ Everything arriving from FACEIT or a demo file is untrusted, however friendly th
 - [ ] File handles and DB connections on the exception path — `try/finally` present?
 - [ ] `seen` sets that grow unbounded across a long run.
 - [ ] Signal handling: Ctrl-C mid-insert. Partial state?
-- [ ] `pipeline.loop()` runs forever with a bare `except Exception` — does a persistent
-      failure become a silent hot loop?
+- [ ] `pipeline.run()` catches per-match exceptions and continues — does the summary and
+      the exit code still reflect every failure?
 
 ---
 

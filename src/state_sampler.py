@@ -1,17 +1,22 @@
 """
 Round-state sampler.
 
-Walks every round and emits a snapshot every SAMPLE_INTERVAL ticks (~1 Hz).
+Walks every round and emits a snapshot every SAMPLE_INTERVAL_S seconds (~1 Hz).
 Each snapshot captures team-level state: alive counts, HP, armor, equipment value,
 utility on hand, active smokes/molotovs, post-plant flags, audio/visual info.
 
 Each row is labelled with `round_won_ct` so the snapshots double as training data
-for the win-probability model.
+for the win-probability model. build_state() builds the same vector at ANY tick,
+which is what impact attribution uses for the states around an action.
 """
+import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
+
+from feature_extractor import _precompute_visibility, _nan, _first_valid, C4_TIMER
 
 # Durations in SECONDS. Everything tick-valued is derived from the demo's real tick
 # rate at run time — a fixed tick count silently halves the real duration on a
@@ -20,29 +25,9 @@ SAMPLE_INTERVAL_S = 1.0    # seconds between training samples
 SNAP_HALF_S       = 0.5    # seconds either side of a sample tick to build a snapshot
 HEARD_WINDOW_S    = 10.0   # how long a sound is "remembered"
 
-SAMPLE_INTERVAL   = 64     # legacy 64-tick defaults, kept for callers without a rate
-SNAP_HALF_WINDOW  = 32
-C4_TIMER          = 40.0   # seconds bomb burns after plant
 ROUND_TIME_S      = 115.0  # seconds of round clock after freeze time (CS2 competitive)
 SITE_BLOCK_RADIUS = 300.0  # units — smoke/molotov covers the bombsite within this
-HEARD_WINDOW      = 640    # legacy default; prefer ctx.heard_window
 HEARD_RANGE       = 1500.0 # units — max distance to hear footsteps/shots
-
-
-def _nan(v) -> bool:
-    try:
-        return v is None or (isinstance(v, float) and math.isnan(v))
-    except (TypeError, ValueError):
-        return False
-
-
-def _first_valid(*vals):
-    """First value that is neither None nor NaN. `or` can't be used here — NaN is
-    truthy, so `official_end or end` never falls through, and 0 is legitimate."""
-    for v in vals:
-        if not _nan(v):
-            return v
-    return None
 
 
 _UTIL_KEYWORDS = {
@@ -125,8 +110,8 @@ def _site_blocked(bomb_xy, positions, radius=SITE_BLOCK_RADIUS) -> bool:
 
 
 def _team_heard_enemy(snap_team, enemy_side, tick, footsteps_df, shots_df, reloads_df,
-                      enemy_names: set | None = None, heard_window: int = HEARD_WINDOW) -> int:
-    """Count how many players on snap_team heard an enemy in the last HEARD_WINDOW ticks."""
+                      heard_window: int, enemy_names: set | None = None) -> int:
+    """Count how many players on snap_team heard an enemy in the last heard_window ticks."""
     if snap_team.empty or "X" not in snap_team.columns:
         return 0
     t_start = tick - heard_window
@@ -167,7 +152,7 @@ def _team_heard_enemy(snap_team, enemy_side, tick, footsteps_df, shots_df, reloa
     return heard
 
 
-def _info_state(snap_ct, snap_t, vis_cache, tick, window_ticks: int = HEARD_WINDOW) -> dict:
+def _info_state(snap_ct, snap_t, vis_cache, tick, window_ticks: int) -> dict:
     empty = {"ct_spotted_count": 0, "t_spotted_count": 0}
     if not vis_cache:
         return empty
@@ -222,10 +207,11 @@ class RoundContext:
     plant_tick:   int | None
     bomb_xy:      tuple | None
     round_won_ct: int
-    tick_rate:    int = 64
-    snap_half:    int = SNAP_HALF_WINDOW
-    sample_interval: int = SAMPLE_INTERVAL
-    heard_window:    int = HEARD_WINDOW
+    # Tick-valued windows, all derived from tick_rate by iter_round_contexts.
+    tick_rate:       int
+    snap_half:       int
+    sample_interval: int
+    heard_window:    int
 
 
 def build_state(tick: int, ctx: RoundContext) -> dict | None:
@@ -306,9 +292,9 @@ def build_state(tick: int, ctx: RoundContext) -> dict | None:
     ct_names = set(snap_ct["name"].tolist()) if "name" in snap_ct.columns else set()
     t_names  = set(snap_t["name"].tolist())  if "name" in snap_t.columns  else set()
     heard_ct = _team_heard_enemy(snap_ct, "t",  tick, ctx.footsteps_df, ctx.shots_df, ctx.reloads_df,
-                                enemy_names=t_names, heard_window=ctx.heard_window)
+                                ctx.heard_window, enemy_names=t_names)
     heard_t  = _team_heard_enemy(snap_t,  "ct", tick, ctx.footsteps_df, ctx.shots_df, ctx.reloads_df,
-                                enemy_names=ct_names, heard_window=ctx.heard_window)
+                                ctx.heard_window, enemy_names=ct_names)
 
     return {
         "match_id":            ctx.match_id,
@@ -363,8 +349,6 @@ def iter_round_contexts(
 ):
     """Yield a RoundContext per playable round. Shared by the sampler and by any
     consumer that needs state at arbitrary ticks (impact attribution)."""
-    from feature_extractor import _precompute_visibility
-
     rounds_df       = tables.get("rounds",               pd.DataFrame())
     ticks_df        = tables.get("ticks",                pd.DataFrame())
     smokes_df       = tables.get("smokes",               pd.DataFrame())
@@ -477,10 +461,7 @@ def sample_round_states(
     map_name: str = "unknown",
     vis_checker=None,
 ) -> list[dict]:
-    """~1 Hz snapshots across every round — the win-probability training rows.
-
-    Now a thin loop over build_state. Behaviour is unchanged: same grid, same fields.
-    """
+    """~1 Hz snapshots across every round — the win-probability training rows."""
     states: list[dict] = []
     for ctx in iter_round_contexts(tables, match_id, map_name, vis_checker):
         n = 0
@@ -511,8 +492,6 @@ def sample_boundary_states(
     Tagged `boundary` so training can exclude them — they cluster around kills, and
     training on them would over-sample exactly the moments being predicted.
     """
-    import json as _json
-
     # resolve ticks wanted per round, from the classification feature_extractor emits
     wanted: dict[int, set] = {}
     for e in events:
@@ -521,7 +500,7 @@ def sample_boundary_states(
         act = e.get("action")
         if isinstance(act, str):
             try:
-                act = _json.loads(act)
+                act = json.loads(act)
             except Exception:
                 continue
         if not isinstance(act, dict) or act.get("impact_kind") != "instantaneous":

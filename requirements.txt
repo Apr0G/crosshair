@@ -4,9 +4,9 @@
 # loudly at parse time or, worse, write differently-shaped rows into the same
 # data/crosshair.db that already holds matches parsed by the old version.
 #
-# These are compatibility ceilings, not the exact resolution that produced the
-# existing corpus — that version is not recorded anywhere. After rebuilding the venv,
-# run `.venv/bin/pip freeze > requirements.lock` so it is recorded from then on.
+# These are compatibility ceilings. requirements.lock is the exact resolution:
+# install with `pip install -r requirements.txt -c requirements.lock` to reproduce it,
+# and re-freeze the lock after any deliberate upgrade.
 
 # demo parsing
 awpy>=2.0.2,<3
@@ -27,8 +27,4 @@ lightgbm>=4.0.0,<5
 # scraping / download
 requests>=2.31.0,<3
 playwright>=1.40.0,<2
-playwright-stealth>=1.0.6,<2   # declared but not imported anywhere — see docs/reviews/
 zstandard>=0.21.0,<1
-
-# LLM — declared but not imported anywhere in src/. See docs/reviews/.
-openai>=2.31.0,<3

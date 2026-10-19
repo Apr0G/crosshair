@@ -134,7 +134,7 @@ are the highest-yield findings**, and a generic checklist misses all of them.
    |---|---|
    | P1 | No path may double-insert a match. Dedup is `db.is_processed`, checked for **both** `<mid>` and `<mid>_m1` id forms. |
    | P2 | Both ingestion sources produce identical downstream rows; they differ only in how the `.dem` reaches disk. |
-   | P3 | All ingestion converges on the seam `pipeline.process_one` → `db.insert_events` / `insert_round_states` / `mark_processed`. No forked pipeline. |
+   | P3 | All ingestion converges on the seam `pipeline.ingest_demo` → `db.store_match`. No forked pipeline. |
    | P4 | A source module exposes exactly `iter_unprocessed_demos(...)` and `download_demo(url, dest)`. |
    | P5 | Impact sign: `p_after - p_before` for a CT actor, negated for T. |
    | P6 | WP split is `GroupShuffleSplit(groups=match_id)` — never a random row split (leaks future round state). |

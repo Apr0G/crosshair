@@ -47,25 +47,22 @@ pipeline as working software, not a draft.
 ---
 
 ## Environment
-- **Always use `.venv/bin/python`** (3.11.15, arm64). Bare `python` on PATH is not
-  guaranteed to be this venv. The venv was rebuilt once because x86_64 wheels under
-  an arm64 host caused numpy/requests circular-import errors — don't `pip install`
-  outside it.
-- **BROKEN as of 2026-08-01:** `.venv` has no `lib/`, no site-packages and no pip
-  (108K total). Only stdlib runs — `main.py status` and `test/test_invariants.py`
-  work; everything else dies at import. Recovery:
-  `/opt/homebrew/opt/python@3.11/bin/python3.11 -m venv --clear .venv` then
-  `.venv/bin/python -m pip install -r requirements.txt`. **Pin the deps first** — a
-  fresh unpinned resolve will not reproduce the awpy that parsed the 710-match corpus.
-  Until this is fixed, "verify before declaring done" is not achievable for most
-  changes; say so rather than claiming a change is tested.
-- `requirements.txt` is the **authoritative** dep list.
-- `pyproject.toml` is stale and untracked: its deps are incomplete (no lightgbm /
-  scikit-learn / requests) and `[project.scripts] crosshair = "crosshair.main:main"`
-  points at a package that doesn't exist. Don't rely on it; don't "fix" it unasked.
-- Secrets via env + `.env` (see `.env.example`). Never hardcode keys or commit secrets.
-  `FACEIT_API_KEY` is used by both ingestion paths; the API path also needs Downloads
-  access granted on that key.
+- **Always use the project venv**: `.venv/bin/python` on macOS/Linux (3.11, arm64 on
+  the Mac), `.venv\Scripts\python.exe` on Windows. Bare `python` on PATH is not
+  guaranteed to be this venv; don't `pip install` outside it. Docs below write the
+  macOS form.
+- Rebuild / install: `python3.11 -m venv .venv` then
+  `.venv/bin/python -m pip install -r requirements.txt -c requirements.lock`.
+  `requirements.txt` is the **authoritative** dep list (compatibility ceilings);
+  `requirements.lock` is the exact resolution and must be re-frozen after any
+  deliberate upgrade. All wheels exist for macOS arm64 and Windows x64 (verified
+  2026-10-19 on Windows).
+- `pyproject.toml` is metadata only and reads its deps from `requirements.txt`.
+- Secrets via env + `.env` (see `.env.example`); `main.py` loads `.env` itself. Never
+  hardcode keys or commit secrets. `FACEIT_API_KEY` is used by both ingestion paths;
+  the API path also needs Downloads access granted on that key.
+- The Playwright path is macOS-only as written (Chrome profile + binary paths in
+  `scraper.py`). On any other machine use `--source api`.
 
 ## Run
 ```bash
@@ -77,21 +74,31 @@ pipeline as working software, not a draft.
 .venv/bin/python src/main.py top -n 10
 .venv/bin/python src/main.py round <match_id> <n> --engagements-only
 ```
-Tests are **plain scripts, not pytest** (pytest isn't installed):
+Tests are **plain scripts, not pytest** (pytest isn't installed). Each exits 0 on
+pass, 1 on failure, 2 when a prerequisite (demo / model / DB) is missing:
 ```bash
-.venv/bin/python test/test_invariants.py           # stdlib only — runs even with the venv broken
-.venv/bin/python test/test_win_probability.py      # needs a trained model; exit 2 = no model
-.venv/bin/python test/test_local_demo.py demos/mirage.dem   # inspection; --write-db to store
-.venv/bin/python test/test_scraper.py <match_id>   # opens real Chrome
+.venv/bin/python test/run_all.py [demos/faceit2.dem]   # runs everything below, tallies
+.venv/bin/python test/test_invariants.py        # stdlib only: schema/feature parity, redaction
+.venv/bin/python test/test_db.py                # stdlib only: fresh schema, migrations, store_match
+.venv/bin/python test/test_attribution.py       # pure: conservation + Shapley on synthetic paths
+.venv/bin/python test/test_feature_extractor.py # synthetic demo tables, no awpy
+.venv/bin/python test/test_state_sampler.py     # synthetic demo tables, no awpy
+.venv/bin/python test/test_score_impact.py      # model stubbed; grid + event scoring on sqlite
+.venv/bin/python test/test_pipeline.py          # the seam + main.py commands, parser stubbed
+.venv/bin/python test/test_download.py          # download_demo against a local HTTP server
+.venv/bin/python test/test_attribution_windows.py [demo]   # + contract checks on a real demo
+.venv/bin/python test/test_build_state.py [demo]           # needs a real demo (awpy)
+.venv/bin/python test/test_win_probability.py   # needs a trained model
+.venv/bin/python test/test_attribution_integration.py      # needs DB + model
+.venv/bin/python test/test_attribution_compare.py          # needs DB + model; grid vs event
 ```
-`test_invariants.py` is the cheap regression guard for the schema traps below — run it
-after any change to `db.py`, `state_sampler.py`, or `win_probability.FEATURES`.
-**Decided (2026-08-01): stay on plain scripts. Don't propose pytest again** unless we
-start testing `feature_extractor` / `state_sampler` / `score_impact` — only then do
-shared fixtures (parse one demo once, reuse across many tests) pay for the dep.
-Note `test_local_demo.py` and `test_scraper.py` are manual inspection scripts despite
-the `test_` prefix. Both are now importable (body inside `main()`) and
-`test_local_demo.py` no longer writes to `data/crosshair.db` unless given `--write-db`.
+Shared bits live in `test/_harness.py` (check/summary) and `test/_synthetic.py` (a
+hand-built 2v2 round as the dict of tables `extract.extract()` returns — the thing
+that lets the extractor, sampler and seam be tested without awpy or a `.dem`).
+**Decided (2026-08-01): stay on plain scripts. Don't propose pytest.**
+`test_local_demo.py` is an inspection script (prints what a demo yields, writes
+nothing — store with `main.py demo`); `test_scraper.py` opens real Chrome. Neither is
+run by `run_all.py`.
 
 ## Module map
 ```
@@ -107,14 +114,18 @@ src/feature_extractor.py  decision events (buy / engagement / utility / rotation
                         visibility + sound-cue precompute
 src/state_sampler.py    ~1 Hz round_states snapshots (WP training rows)
 src/win_probability.py  LightGBM train/load/predict; FEATURES list lives here
-src/score_impact.py     brackets each event between two states → p_before/p_after/impact
-src/db.py               SQLite schema + insert helpers + dedup
+src/attribution.py      pure event-boundary attribution engine (partition + conservation)
+src/score_impact.py     scores events: grid bracketing (default) or event-boundary (attribution.py)
+src/db.py               SQLite schema + migrations + store_match (one transaction per match)
+                        also owns the shared paths: ROOT, DATA_DIR, DB_PATH, MODEL_PATH
 ```
 
-**THE SEAM** — both ingestion sources converge here; anything new that produces a
+**THE SEAM** — every ingestion source converges here; anything new that produces a
 local `.dem` must plug in here rather than fork the pipeline:
-`pipeline.process_one()` → `db.insert_events` / `db.insert_round_states` / `db.mark_processed`.
-A source module only has to expose `iter_unprocessed_demos(...)` and `download_demo(url, dest)`.
+`pipeline.ingest_demo(match_id, path)` → extract → events + grid states + boundary
+states → `db.store_match` (one transaction). `process_one` (scrape) downloads then
+calls it; `main.py demo` calls it directly. A source module only has to expose
+`iter_unprocessed_demos(...)` and `download_demo(url, dest)`.
 
 ## Invariants
 - **Idempotency:** never write logic that can double-insert a match. Dedup is
@@ -158,33 +169,23 @@ A source module only has to expose `iter_unprocessed_demos(...)` and `download_d
   and LightGBM handles missing natively.
 - **`or` does not work as a null-coalesce over numerics.** `NaN` is truthy, so
   `official_end or end` never falls through, and `0` is a legitimate value. Use the
-  `_first_valid` helper in `state_sampler` / `feature_extractor`.
-- Credential-bearing URLs must go through `pipeline.redact_url` before any `print`,
-  exception message, or DB write. Never truncate a URL by character count — FACEIT
+  `_nan` / `_first_valid` helpers in `feature_extractor` (`state_sampler` imports them).
+- Credential-bearing URLs must go through `scraper.redact_url` (re-exported by
+  `pipeline`) before any `print`, exception message, or DB write. Never truncate a URL by character count — FACEIT
   signed URLs carry the signature in the query string and truncation length is luck.
 
-## Schema traps (verified 2026-08-01 — re-check before trusting)
-The schema is all `CREATE TABLE IF NOT EXISTS`, so re-running `_init_schema` — which
-`init_db()` does on **every** run, not just on file creation — can never add a column
-to an existing table. There is no `ALTER TABLE` and no `schema_version` anywhere, so
-editing the `CREATE TABLE` alone will silently do nothing to the live DB.
-Two live consequences:
+## Schema and migrations
+`CREATE TABLE IF NOT EXISTS` can never add a column to an existing table, so `db.py`
+carries ordered additive migrations (`_MIGRATIONS`, keyed by `PRAGMA user_version`,
+current `SCHEMA_VERSION = 2`). `db._conn()` creates the schema on a fresh file and
+migrates an old one on every open; `init_db()` just does that up front.
+**Adding a column means three edits**: `_init_schema`, a new `_MIGRATIONS` entry with
+`SCHEMA_VERSION` bumped, and (for a state field) `_STATES_SQL`. `test/test_db.py`
+migrates a v0 database and `test/test_invariants.py` cross-checks the three lists;
+both must stay green. DB changes remain additive-only and ask-first.
 
-1. **Live DB is behind `db.py`.** `data/crosshair.db` (3.6 GB, 710 matches, 2.80 M events,
-   1.18 M states) has 37 data columns in `round_states`; `insert_round_states` writes 41.
-   Missing: `active_smokes_xy`, `active_infernos_xy`, `site_smoked`, `site_on_fire`.
-   Any new ingest into this DB fails on insert until it's migrated or recreated.
-2. **`db.py` is behind the live DB.** `_init_schema`'s `events` table has no
-   `p_before` / `p_after` / `impact`, but `score_impact.py`, `main.py status`, and
-   `main.py top` all read/write them. The live DB has them (added ad hoc); a **fresh**
-   DB does not, so `status` and `score` break on a clean start.
-
-Both are known and unfixed. Don't silently paper over them — propose an additive
-migration (`ALTER TABLE ... ADD COLUMN`) plus matching `_init_schema` columns and let
-me choose migrate-vs-recreate.
-
-Also: `data/win_prob.lgb` currently does **not** exist. `score`, `top`, and the WP tests
-all require `train` to have been run first.
+`data/` is gitignored: `crosshair.db` and `win_prob.lgb` exist only where the pipeline
+has been run. `score`, `top`, and the WP tests need `train` to have run first.
 
 ## Docs accuracy
 `README.md` numbers (1024 matches, 2.8 M events, 3.90 GB, AUC 0.896) are from a

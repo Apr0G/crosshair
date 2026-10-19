@@ -3,15 +3,14 @@ Demo parsing wrapper around awpy.
 
 Loads a .dem file and returns a dict of pandas DataFrames:
   rounds, ticks, kills, damages, shots, grenades, smokes, infernos, bomb,
-  footsteps, plus one DataFrame per game event (event_<name>).
+  footsteps, plus one DataFrame per game event (event_<name>),
+and two scalars: map_name and tick_rate.
 
-Usage:
-    python src/extract.py path/to/match.dem
+To eyeball what a demo yields: `.venv/bin/python test/test_local_demo.py <demo>`.
 """
-
-import sys
 from pathlib import Path
 
+import pandas as pd
 import polars as pl
 from awpy.demo import Demo
 
@@ -29,43 +28,26 @@ EVENTS = [
     "smokegrenade_detonate", "smokegrenade_expired", "weapon_fire",
 ]
 
+PLAYER_PROPS = [
+    "cash", "cash_spent_this_round", "total_cash_spent",
+    "armor_value", "has_helmet", "has_defuser", "inventory", "current_equip_value",
+    "health", "is_alive",
+    "velocity_X", "velocity_Y", "velocity_Z", "pitch", "yaw",
+    "flash_duration", "zoom_lvl", "accuracy_penalty", "ping",
+]
 
-def extract(demo_path: str) -> dict[str, "pd.DataFrame"]:
-    import pandas as pd
 
+def extract(demo_path: str) -> dict[str, object]:
     path = Path(demo_path)
     if not path.exists():
         raise FileNotFoundError(f"Demo not found: {demo_path}")
 
     print(f"Parsing {path.name} ...")
     demo = Demo(path=path, verbose=False)
-    demo.parse(
-        events=EVENTS,
-        player_props=[
-            "cash",
-            "cash_spent_this_round",
-            "total_cash_spent",
-            "armor_value",
-            "has_helmet",
-            "has_defuser",
-            "inventory",
-            "current_equip_value",
-            "health",
-            "is_alive",
-            "velocity_X",
-            "velocity_Y",
-            "velocity_Z",
-            "pitch",
-            "yaw",
-            "flash_duration",
-            "zoom_lvl",
-            "accuracy_penalty",
-            "ping",
-        ]
-    )
+    demo.parse(events=EVENTS, player_props=PLAYER_PROPS)
     print("Done.\n")
 
-    def to_pd(df: pl.DataFrame) -> "pd.DataFrame":
+    def to_pd(df: pl.DataFrame) -> pd.DataFrame:
         return df.to_pandas()
 
     header = getattr(demo, "header", None) or {}
@@ -94,10 +76,9 @@ def extract(demo_path: str) -> dict[str, "pd.DataFrame"]:
     except (KeyError, AttributeError) as e:
         print(f"  [warn] table 'footsteps' unavailable: {e}")
 
-    for name, attr in [("smokes", "smokes"), ("infernos", "infernos"),
-                       ("bomb", "bomb")]:
+    for name in ("smokes", "infernos", "bomb"):
         try:
-            tables[name] = to_pd(getattr(demo, attr))
+            tables[name] = to_pd(getattr(demo, name))
         except AttributeError as e:
             # A genuinely absent optional table. Anything else (a parser error, a
             # renamed column) must NOT be swallowed — it silently degrades six-plus
@@ -108,19 +89,3 @@ def extract(demo_path: str) -> dict[str, "pd.DataFrame"]:
         tables[f"event_{event_name}"] = to_pd(event_df)
 
     return tables
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python extract.py path/to/match.dem")
-        sys.exit(1)
-
-    tables = extract(sys.argv[1])
-    for name, df in tables.items():
-        # map_name and tick_rate are scalars, not frames.
-        if not hasattr(df, "shape"):
-            print(f"{name}: {df}\n")
-            continue
-        print(f"{name}: {df.shape[0]} rows x {df.shape[1]} cols")
-        print(df.head(3))
-        print()

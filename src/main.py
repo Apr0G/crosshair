@@ -14,30 +14,29 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 from pathlib import Path
 
-ROOT    = Path(__file__).parent.parent
-DB_PATH = ROOT / "data" / "crosshair.db"
-
 sys.path.insert(0, str(Path(__file__).parent))
+
+import db   # noqa: E402  — stdlib-only at import, so `status` runs on a bare venv
+
+ROOT, DB_PATH, MODEL_PATH = db.ROOT, db.DB_PATH, db.MODEL_PATH
 
 
 def _load_dotenv() -> None:
     """Read .env into the environment if it is not already there.
 
-    Nothing loaded .env before — os.getenv only ever sees the real environment — so
-    every invocation needed `set -a; source .env` first, and forgetting it produced
-    a bare "FACEIT_API_KEY not set" several calls deep. Stdlib only; a real shell
-    export always wins, so this cannot override what the operator set deliberately.
+    Stdlib only; a real shell export always wins, so this cannot override what the
+    operator set deliberately.
     """
-    import os
     env = ROOT / ".env"
     if not env.exists():
         return
     try:
-        for line in env.read_text().splitlines():
+        for line in env.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -55,6 +54,7 @@ _load_dotenv()
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _conn() -> sqlite3.Connection:
+    """Plain read connection for the report commands (no schema side effects)."""
     if not DB_PATH.exists():
         sys.exit(f"No database at {DB_PATH}. Run `scrape` or `demo` first.")
     return sqlite3.connect(DB_PATH)
@@ -64,6 +64,12 @@ def _short(s: str, n: int = 22) -> str:
     return s if len(s) <= n else s[:n] + "…"
 
 
+def _like_literal(s: str) -> str:
+    """Escape LIKE metacharacters. Nicknames commonly contain _ and %, which would
+    otherwise act as wildcards and silently match a different player."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 # ── commands ──────────────────────────────────────────────────────────────────
 
 def cmd_status(args):
@@ -71,13 +77,13 @@ def cmd_status(args):
     n_matches = con.execute("SELECT COUNT(*) FROM processed_matches").fetchone()[0]
     n_events  = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     n_states  = con.execute("SELECT COUNT(*) FROM round_states").fetchone()[0]
-    # `impact` is absent from a DB built by db._init_schema — degrade instead of
-    # dying with a raw OperationalError before printing anything.
+    # `impact` is absent from a DB that predates migration v1 and has not been opened
+    # by the pipeline since — degrade instead of dying before printing anything.
     try:
         n_scored = con.execute("SELECT COUNT(*) FROM events WHERE impact IS NOT NULL").fetchone()[0]
         scored_note = f"{n_scored:,} scored, {100 * n_scored // max(n_events, 1)}%"
     except sqlite3.OperationalError:
-        scored_note = "impact column missing — schema needs migrating"
+        scored_note = "impact column missing — run `demo`/`scrape` once to migrate"
 
     print(f"DB        : {DB_PATH}  ({DB_PATH.stat().st_size / 1e9:.2f} GB)")
     print(f"Matches   : {n_matches:,}")
@@ -96,14 +102,13 @@ def cmd_status(args):
     ):
         print(f"  {m or 'unknown':<14} {n:>4} matches")
 
-    model = ROOT / "data" / "win_prob.lgb"
-    print(f"\nWP model  : {'✓ present' if model.exists() else '✗ NOT TRAINED'}")
+    print(f"\nWP model  : {'✓ present' if MODEL_PATH.exists() else '✗ NOT TRAINED'}")
     con.close()
     return 0
 
 
 def cmd_scrape(args):
-    if getattr(args, "workers", 1) > 1:
+    if args.workers > 1:
         return _scrape_parallel(args)
     import pipeline
     n_failed = pipeline.run(
@@ -142,7 +147,6 @@ def _scrape_parallel(args) -> int:
 
     # Create and migrate the schema ONCE up front. Six workers racing to build a
     # missing DB is the "database is locked" case, and it is entirely avoidable.
-    import db
     db.init_db()
     procs = []
     print(f"launching {n} workers × {per} players each "
@@ -162,8 +166,8 @@ def _scrape_parallel(args) -> int:
         print(f"  worker {i}: offset {args.start_offset + i * per:>4}  → {log.name}")
         procs.append((i, subprocess.Popen(cmd, stdout=log.open("w"), stderr=subprocess.STDOUT)))
 
-    print(f"\n  tail -f scrape-w*.log   to watch")
-    print(f"  .venv/bin/python src/main.py status   for totals\n")
+    print("\n  tail -f scrape-w*.log   to watch")
+    print("  .venv/bin/python src/main.py status   for totals\n")
 
     failed = 0
     for i, p in procs:
@@ -174,10 +178,7 @@ def _scrape_parallel(args) -> int:
 
 
 def cmd_demo(args):
-    import db
-    import extract as extractor
-    import feature_extractor
-    import state_sampler
+    import pipeline
 
     match_id = args.match_id or f"local_{Path(args.path).stem}"
     db.init_db()
@@ -188,19 +189,8 @@ def cmd_demo(args):
         return 0
 
     print(f"=== processing {args.path} ===")
-    tables = extractor.extract(args.path)
-    map_name = tables.get("map_name", "unknown")
-    vis_checker = feature_extractor.build_vis_checker(map_name)
-
-    events = feature_extractor.extract_events(tables, match_id=match_id, map_name=map_name, vis_checker=vis_checker)
-    states = state_sampler.sample_round_states(tables, match_id=match_id, map_name=map_name, vis_checker=vis_checker)
-    boundary = state_sampler.sample_boundary_states(tables, match_id, events, map_name, vis_checker=vis_checker)
-    if boundary:
-        print(f"[{match_id}] + {len(boundary)} boundary states")
-        states = states + boundary
-
-    db.store_match(match_id, events, states, map_name, args.path)
-    print(f"[{match_id}] stored {len(events):,} events, {len(states):,} states.")
+    n_events, n_states = pipeline.ingest_demo(match_id, args.path, demo_url=str(args.path))
+    print(f"[{match_id}] stored {n_events:,} events, {n_states:,} states.")
     return 0
 
 
@@ -212,11 +202,8 @@ def cmd_train(args):
 
 def cmd_score(args):
     import score_impact
-    argv = []
-    if args.match_id:            argv += ["--match-id", args.match_id]
-    if args.limit is not None:   argv += ["--limit", str(args.limit)]
-    if getattr(args, "attribution", None): argv += ["--attribution", args.attribution]
-    return score_impact.main(argv)
+    return score_impact.run(match_id=args.match_id, limit=args.limit,
+                            attribution=args.attribution)
 
 
 def cmd_top(args):
@@ -255,12 +242,6 @@ def cmd_top(args):
               f"{(r[4] or '-'):<4} {(r[5] or '-'):<11} {r[6]:>6.3f} {r[7]:>6.3f} {r[8]:>+7.3f}")
     con.close()
     return 0
-
-
-def _like_literal(s: str) -> str:
-    """Escape LIKE metacharacters. Nicknames commonly contain _ and %, which would
-    otherwise act as wildcards and silently match a different player."""
-    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def cmd_player(args):
@@ -328,12 +309,11 @@ def cmd_round(args):
         con.close()
         return 1
 
-    # Get round winner
     winner = con.execute("""
         SELECT round_won_ct FROM round_states
         WHERE match_id = ? AND round_num = ? LIMIT 1
     """, (args.match_id, args.round)).fetchone()
-    winner_side = "CT" if (winner and winner[0]) else "T"
+    winner_side = "?" if winner is None else ("CT" if winner[0] else "T")
 
     print(f"\nMatch {args.match_id}  round {args.round}  ({winner_side} won)\n")
     print(f"  {'t':>6} {'side':<4} {'type':<11} {'role':<8} {'result':<6} {'wpn':<10} {'WP':>6} {'imp':>7}")
@@ -352,7 +332,7 @@ def cmd_round(args):
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-def main():
+def main(argv=None):
     ap  = argparse.ArgumentParser(prog="crosshair", description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -396,7 +376,7 @@ def main():
     sp.add_argument("--side",       choices=["ct", "t"])
     sp.set_defaults(fn=cmd_top)
 
-    sp = sub.add_parser("player", help="Aggregate impact for one player by name")
+    sp = sub.add_parser("player", help="Scored engagements mentioning one player name")
     sp.add_argument("name")
     sp.add_argument("-n", type=int, default=20)
     sp.set_defaults(fn=cmd_player)
@@ -407,7 +387,7 @@ def main():
     sp.add_argument("--engagements-only", action="store_true")
     sp.set_defaults(fn=cmd_round)
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     return args.fn(args) or 0
 
 

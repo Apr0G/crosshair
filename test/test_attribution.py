@@ -20,22 +20,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from _harness import check, close, summary
 from attribution import (Action, attribute_round, terminal_wp,
                          KIND_INSTANT, KIND_DURATIVE, KIND_ROUND, CT, T)
 
-PASS = "\033[32m✓\033[0m"
-FAIL = "\033[31m✗\033[0m"
-_results: list[tuple[bool, str]] = []
 TOL = 1e-9
-
-
-def check(desc: str, ok: bool, detail: str = ""):
-    _results.append((bool(ok), desc))
-    print(f"  {PASS if ok else FAIL}  {desc}" + (f"  ({detail})" if detail else ""))
-
-
-def close(a, b, tol=1e-6) -> bool:
-    return a is not None and b is not None and abs(a - b) <= tol
 
 
 def step_path(points: dict, default: float = 0.5):
@@ -309,15 +298,7 @@ def main() -> int:
     check("both sides eliminated is undefined", terminal_wp({"alive_ct": 0, "alive_t": 0}) is None)
     check("None state is handled", terminal_wp(None) is None)
 
-    passed = sum(1 for ok, _ in _results if ok)
-    failed = [d for ok, d in _results if not ok]
-    print(f"\n{'─'*60}\n  {passed}/{len(_results)} passed")
-    if failed:
-        print("  Failed:")
-        for d in failed:
-            print(f"    - {d}")
-    print()
-    return 0 if not failed else 1
+    return summary()
 
 
 if __name__ == "__main__":

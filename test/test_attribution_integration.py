@@ -17,7 +17,6 @@ between bracketing samples. That is the same limitation the grid method has, and
 it is exactly what persisting boundary states removes. Durative actions span
 multiple samples, so they are unaffected. Reported below as "resolution-limited".
 """
-import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -27,40 +26,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import numpy as np
 import pandas as pd
 
-from attribution import (Action, attribute_round, terminal_wp,
-                         KIND_INSTANT, KIND_DURATIVE, KIND_ROUND)
-from win_probability import FEATURES, MODEL_PATH, load_model
-
-DB = Path(__file__).parent.parent / "data" / "crosshair.db"
-PASS = "\033[32m✓\033[0m"
-FAIL = "\033[31m✗\033[0m"
-_results: list[tuple[bool, str]] = []
-
-
-def check(desc: str, ok: bool, detail: str = ""):
-    _results.append((bool(ok), desc))
-    print(f"  {PASS if ok else FAIL}  {desc}" + (f"  ({detail})" if detail else ""))
-
-
-def make_wp_fn(ticks: np.ndarray, wps: np.ndarray, states: list[dict]):
-    """WP over a round's timeline, interpolated between 1 Hz samples.
-
-    Terminal states are facts, not predictions: the model never sees alive_ct == 0
-    (training excludes decided rows), so those are pinned rather than asked.
-    """
-    pinned = wps.copy()
-    for i, st in enumerate(states):
-        t = terminal_wp(st)
-        if t is not None:
-            pinned[i] = t
-
-    lo, hi = ticks[0], ticks[-1]
-
-    def wp(tick):
-        if tick is None or tick < lo or tick > hi:
-            return None
-        return float(np.interp(tick, ticks, pinned))
-    return wp
+from _harness import check, section, summary
+from attribution import attribute_round, RoundResult, KIND_INSTANT, KIND_DURATIVE
+from db import DB_PATH as DB, MODEL_PATH
+# The production path, not a stand-in: the same WP-path builder and action parser
+# that score_match_event runs.
+from score_impact import _actions_for_round, _wp_path
 
 
 def main() -> int:
@@ -71,7 +42,6 @@ def main() -> int:
 
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
-    model = load_model()
 
     mids = [r[0] for r in con.execute("SELECT match_id FROM processed_matches ORDER BY match_id")]
     if limit:
@@ -94,45 +64,23 @@ def main() -> int:
             con, params=(mid,))
         if states.empty:
             continue
-        from score_impact import _score_states
-        states["_wp"] = _score_states(states)
 
         events = pd.read_sql_query(
             "SELECT id, round_num, player_side, action FROM events WHERE match_id=?",
             con, params=(mid,))
 
         for rn, grp in states.groupby("round_num"):
-            grp = grp.sort_values("tick")
+            grp = grp.sort_values("tick").reset_index(drop=True)
             if len(grp) < 3:
                 continue
-            ticks = grp["tick"].to_numpy(dtype=float)
-            wps   = grp["_wp"].to_numpy(dtype=float)
-            recs  = grp.to_dict("records")
-            wp_fn = make_wp_fn(ticks, wps, recs)
-
-            actions = []
-            for e in events[events["round_num"] == rn].itertuples(index=False):
-                try:
-                    act = json.loads(e.action or "{}")
-                except Exception:
-                    continue
-                kind = act.get("impact_kind")
-                if kind is None:
-                    continue
-                by_kind[kind] = by_kind.get(kind, 0) + 1
-                win = None
-                if kind == KIND_DURATIVE:
-                    ws, we = act.get("window_start_tick"), act.get("window_end_tick")
-                    if ws is None or we is None:
-                        continue
-                    win = (ws, we)
-                actions.append(Action(
-                    event_id=int(e.id), kind=kind, side=(e.player_side or "?"),
-                    resolve_tick=act.get("resolve_tick"), window=win))
+            wp_fn, lo, hi = _wp_path(grp)
+            actions = _actions_for_round(events[events["round_num"] == rn])
+            for a in actions:
+                by_kind[a.kind] = by_kind.get(a.kind, 0) + 1
 
             if not actions:
                 continue
-            res = attribute_round(actions, wp_fn, int(ticks[0]), int(ticks[-1]))
+            res = attribute_round(actions, wp_fn, lo, hi)
             if not res.attributions:
                 continue
 
@@ -160,7 +108,10 @@ def main() -> int:
                         want = delta if side_of[at.event_id] == "ct" else -delta
                         if at.method == "instant":
                             # sole action on its tick: it takes the whole jump
-                            (sign_ok := sign_ok + 1) if abs(at.impact - want) < 1e-9 else (sign_bad := sign_bad + 1)
+                            if abs(at.impact - want) < 1e-9:
+                                sign_ok += 1
+                            else:
+                                sign_bad += 1
                         else:
                             # a share of the jump: magnitude differs, DIRECTION must not
                             if abs(want) < 1e-12 or (at.impact >= 0) == (want >= 0):
@@ -175,17 +126,17 @@ def main() -> int:
 
     print(f"\n  rounds attributed : {n_rounds:,}")
     print(f"  actions valued    : {n_actions:,}")
-    print(f"  by class          : " + ", ".join(f"{k}={v:,}" for k, v in sorted(by_kind.items())))
+    print("  by class          : " + ", ".join(f"{k}={v:,}" for k, v in sorted(by_kind.items())))
 
-    print("\n── conservation on real rounds ──────────────────────────────────────────")
+    section("conservation on real rounds")
     print(f"    max |residual|    {residuals.max():.3e}")
     print(f"    mean |residual|   {residuals.mean():.3e}")
     check("every round conserves to 1e-9", residuals.max() < 1e-9, f"max {residuals.max():.2e}")
     check("conservation is a REAL check (drift accumulated, not derived)",
-          hasattr(__import__("attribution").RoundResult, "ct_attributed"))
+          hasattr(RoundResult, "ct_attributed"))
     check("attributed a non-trivial number of rounds", n_rounds > 500, str(n_rounds))
 
-    print("\n── how much of each round is explained ─────────────────────────────────")
+    section("how much of each round is explained")
     # Signed sums cancel across sides, so magnitude is the meaningful denominator.
     share = abs_attr / max(abs_attr + drifts.sum(), 1e-12)
     print(f"    total |WP swing|     {swings.sum():.1f}")
@@ -194,13 +145,13 @@ def main() -> int:
     print(f"    attributed magnitude {share:.1%}")
     check("most of the movement is attributed, not left as drift", share > 0.5, f"{share:.1%}")
 
-    print("\n── sign convention (P5) ────────────────────────────────────────────────")
+    section("sign convention (P5)")
     check("sole-action-on-tick impacts equal their side's signed delta",
           sign_bad == 0, f"{sign_bad} wrong of {sign_ok + sign_bad}")
     check("split impacts keep the correct DIRECTION for their side",
           split_bad == 0, f"{split_bad} wrong of {split_ok + split_bad}")
 
-    print("\n── resolution limit that boundary states will remove ───────────────────")
+    section("resolution limit that boundary states remove")
     pct = 100.0 * zero_jump / max(instant_total, 1)
     print(f"    instantaneous actions valued : {instant_total:,}")
     print(f"    of those, zero jump          : {zero_jump:,} ({pct:.1f}%)")
@@ -208,13 +159,7 @@ def main() -> int:
     check("durative actions are scored (unaffected by 1 Hz resolution)",
           scored_by_kind.get(KIND_DURATIVE, 0) > 0, f"{scored_by_kind.get(KIND_DURATIVE,0):,}")
 
-    passed = sum(1 for ok, _ in _results if ok)
-    failed = [d for ok, d in _results if not ok]
-    print(f"\n{'─'*60}\n  {passed}/{len(_results)} passed")
-    if failed:
-        print("  Failed:");  [print(f"    - {d}") for d in failed]
-    print()
-    return 0 if not failed else 1
+    return summary()
 
 
 if __name__ == "__main__":

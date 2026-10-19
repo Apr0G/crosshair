@@ -118,7 +118,7 @@ optional.
 ```markdown
 | Rule | Statement | Status | Evidence |
 |---|---|---|---|
-| P1 | No path may double-insert a match | ✗ VIOLATED | HIGH-01 — events commit before `mark_processed` |
+| P1 | No path may double-insert a match | ✗ VIOLATED | HIGH-01 — a write path commits outside `store_match` |
 | P5 | Impact sign: CT `p_after - p_before`, T negated | ✓ HOLDS | `src/score_impact.py:58` |
 | P13 | `/security-review` before every commit | ⚠ UNENFORCED | Documented in `CLAUDE.md`; no hook or CI check |
 ```

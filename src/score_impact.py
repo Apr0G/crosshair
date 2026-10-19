@@ -2,32 +2,29 @@
 Score every event in the DB with WP-before / WP-after / impact.
 
 For each event:
-  - p_before = CT win probability at the round_state just before the event
-  - p_after  = CT win probability at the round_state just after the event
+  - p_before = CT win probability just before the event
+  - p_after  = CT win probability just after the event
   - impact   = signed delta from the actor's perspective
                  ct actor: p_after - p_before
                  t  actor: p_before - p_after   (i.e. negative of CT delta)
 
-Usage:
-    python src/score_impact.py                     # all matches
-    python src/score_impact.py --match-id <id>     # single match
-    python src/score_impact.py --limit 50          # first N matches
+Two attribution methods, selected by `main.py score --attribution`:
+  grid   (default) bracket each event between the two nearest ~1 Hz round_states
+         samples — every event inside that second receives the same delta
+  event  partition the round's timeline at every action boundary (attribution.py);
+         uses the boundary states written at action ticks when they exist
 """
-import argparse
 import json
 import sqlite3
-import sys
 import time
-from pathlib import Path
 from bisect import bisect_right
 
 import numpy as np
 import pandas as pd
 
 from attribution import Action, attribute_round, terminal_wp, KIND_DURATIVE
+from db import DB_PATH
 from win_probability import FEATURES, load_model
-
-DB_PATH = Path(__file__).parent.parent / "data" / "crosshair.db"
 
 
 def _score_states(states_df: pd.DataFrame) -> np.ndarray:
@@ -43,6 +40,8 @@ def _score_states(states_df: pd.DataFrame) -> np.ndarray:
             X[col] = pd.to_numeric(X[col], errors="coerce")
     return load_model().predict(X)
 
+
+# ── grid attribution ──────────────────────────────────────────────────────────
 
 def _impact_for_event(t_event: float, side: str, state_times: list[float], wp: np.ndarray
                       ) -> tuple[float | None, float | None, float | None]:
@@ -74,6 +73,58 @@ def _impact_for_event(t_event: float, side: str, state_times: list[float], wp: n
     return p_before, p_after, float(impact)
 
 
+def score_match(con: sqlite3.Connection, match_id: str) -> int:
+    """Grid attribution for all events in one match. Returns # of events updated."""
+    states = pd.read_sql_query(
+        "SELECT * FROM round_states WHERE match_id = ? "
+        "ORDER BY round_num, time_into_round_s",
+        con, params=(match_id,),
+    )
+    if states.empty:
+        return 0
+
+    # wp_all is positional; group.index is label-based. They coincide only because
+    # read_sql_query hands back a RangeIndex — make that explicit so a future filter
+    # or sort here can't silently score events against the wrong states.
+    states = states.reset_index(drop=True)
+    wp_all = _score_states(states)
+
+    # Bucket states + WP by round
+    by_round: dict[int, tuple[list[float], np.ndarray]] = {}
+    for rn, group in states.groupby("round_num", sort=False):
+        idx = group.index.to_numpy()
+        by_round[int(rn)] = (
+            group["time_into_round_s"].astype(float).tolist(),
+            wp_all[idx],
+        )
+
+    events = pd.read_sql_query(
+        "SELECT id, round_num, player_side, time_into_round FROM events WHERE match_id = ?",
+        con, params=(match_id,),
+    )
+    if events.empty:
+        return 0
+
+    updates = []
+    for row in events.itertuples(index=False):
+        rn = int(row.round_num) if pd.notna(row.round_num) else None
+        if rn is None or rn not in by_round:
+            continue
+        # 0.0 is a real sample timestamp (the round's first state), so defaulting a
+        # missing time to it would confidently attribute the first second's swing.
+        if pd.isna(row.time_into_round):
+            continue
+        t    = float(row.time_into_round)
+        side = (row.player_side or "").lower()
+        state_times, wp = by_round[rn]
+        p_b, p_a, imp = _impact_for_event(t, side, state_times, wp)
+        updates.append((p_b, p_a, imp, int(row.id)))
+
+    return _write_updates(con, match_id, updates)
+
+
+# ── event-boundary attribution ────────────────────────────────────────────────
+
 def _wp_path(states: pd.DataFrame):
     """Win probability across a round's timeline.
 
@@ -99,7 +150,9 @@ def _wp_path(states: pd.DataFrame):
     return at, int(lo), int(hi)
 
 
-def _actions_for_round(events: pd.DataFrame) -> list:
+def _actions_for_round(events: pd.DataFrame) -> list[Action]:
+    """Turn a round's event rows into attribution Actions, from the classification
+    feature_extractor stored in each event's `action` blob."""
     out = []
     for e in events.itertuples(index=False):
         try:
@@ -148,88 +201,25 @@ def score_match_event(con: sqlite3.Connection, match_id: str) -> tuple[int, floa
         for a in res.attributions:
             updates.append((a.p_before, a.p_after, a.impact, a.event_id))
 
+    return _write_updates(con, match_id, updates), worst
+
+
+# ── shared ────────────────────────────────────────────────────────────────────
+
+def _write_updates(con: sqlite3.Connection, match_id: str, updates: list[tuple]) -> int:
     if not updates:
-        return 0, worst
+        return 0
+    # Clear first: an event this pass skips (no states for its round, NULL time)
+    # would otherwise keep values from a previous model and silently mix scales.
     con.execute("UPDATE events SET p_before=NULL, p_after=NULL, impact=NULL WHERE match_id=?",
                 (match_id,))
     con.executemany("UPDATE events SET p_before=?, p_after=?, impact=? WHERE id=?", updates)
     con.commit()
-    return len(updates), worst
-
-
-def score_match(con: sqlite3.Connection, match_id: str) -> int:
-    """Score all events in one match. Returns # of events updated."""
-    states = pd.read_sql_query(
-        "SELECT * FROM round_states WHERE match_id = ? "
-        "ORDER BY round_num, time_into_round_s",
-        con, params=(match_id,),
-    )
-    if states.empty:
-        return 0
-
-    # wp_all is positional; group.index is label-based. They coincide only because
-    # read_sql_query hands back a RangeIndex — make that explicit so a future filter
-    # or sort here can't silently score events against the wrong states.
-    states = states.reset_index(drop=True)
-    wp_all = _score_states(states)
-
-    # Bucket states + WP by round
-    by_round: dict[int, tuple[list[float], np.ndarray]] = {}
-    for rn, group in states.groupby("round_num", sort=False):
-        idx = group.index.to_numpy()
-        by_round[int(rn)] = (
-            group["time_into_round_s"].astype(float).tolist(),
-            wp_all[idx],
-        )
-
-    # Pull events for this match
-    events = pd.read_sql_query(
-        "SELECT id, round_num, player_side, time_into_round FROM events WHERE match_id = ?",
-        con, params=(match_id,),
-    )
-    if events.empty:
-        return 0
-
-    updates = []
-    for row in events.itertuples(index=False):
-        rn   = int(row.round_num) if pd.notna(row.round_num) else None
-        if rn is None or rn not in by_round:
-            continue
-        # 0.0 is a real sample timestamp (the round's first state), so defaulting a
-        # missing time to it would confidently attribute the first second's swing.
-        if pd.isna(row.time_into_round):
-            continue
-        t    = float(row.time_into_round)
-        side = (row.player_side or "").lower()
-        state_times, wp = by_round[rn]
-        p_b, p_a, imp = _impact_for_event(t, side, state_times, wp)
-        updates.append((p_b, p_a, imp, int(row.id)))
-
-    if not updates:
-        return 0
-
-    # Clear first: an event this pass skips (no states for its round, NULL time)
-    # would otherwise keep values from a previous model and silently mix scales.
-    con.execute(
-        "UPDATE events SET p_before=NULL, p_after=NULL, impact=NULL WHERE match_id=?",
-        (match_id,),
-    )
-    con.executemany(
-        "UPDATE events SET p_before=?, p_after=?, impact=? WHERE id=?",
-        updates,
-    )
-    con.commit()
     return len(updates)
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--match-id", help="Score only this match")
-    ap.add_argument("--limit",    type=int, help="Score first N matches")
-    ap.add_argument("--attribution", choices=["grid", "event"], default="grid",
-                    help="grid = legacy 1 Hz bracketing; event = per-action boundaries")
-    args = ap.parse_args(argv)
-
+def run(match_id: str | None = None, limit: int | None = None, attribution: str = "grid") -> int:
+    """Score every processed match (or one / the first N). Returns a process exit code."""
     if not DB_PATH.exists():
         print(f"No database at {DB_PATH}. Run `scrape` or `demo` first.")
         return 1
@@ -243,20 +233,20 @@ def main(argv=None) -> int:
 
     con = sqlite3.connect(f"file:{DB_PATH}?mode=rw", uri=True, timeout=30)
     try:
-        if args.match_id:
-            match_ids = [args.match_id]
+        if match_id:
+            match_ids = [match_id]
         else:
             q = "SELECT match_id FROM processed_matches ORDER BY match_id"
-            if args.limit is not None:   # `if args.limit:` made --limit 0 mean "all"
-                q += f" LIMIT {int(args.limit)}"
+            if limit is not None:   # `if limit:` made --limit 0 mean "all"
+                q += f" LIMIT {int(limit)}"
             match_ids = [r[0] for r in con.execute(q).fetchall()]
 
-        print(f"Scoring {len(match_ids)} match(es) [attribution={args.attribution}] ...")
+        print(f"Scoring {len(match_ids)} match(es) [attribution={attribution}] ...")
         t0 = time.time()
         total = 0
         worst_residual = 0.0
         for i, mid in enumerate(match_ids, 1):
-            if args.attribution == "event":
+            if attribution == "event":
                 n, resid = score_match_event(con, mid)
                 worst_residual = max(worst_residual, resid)
             else:
@@ -268,13 +258,9 @@ def main(argv=None) -> int:
                 print(f"  [{i}/{len(match_ids)}] {mid[:36]} → {n:>5} events "
                       f"({total:,} total, {rate:.0f} ev/s, eta {eta:.0f}s)")
         print(f"\nDone. Updated {total:,} events in {time.time() - t0:.1f}s.")
-        if args.attribution == "event":
+        if attribution == "event":
             print(f"attribution: event-boundary | worst conservation residual "
                   f"{worst_residual:.2e} (must be ~0)")
         return 0
     finally:
         con.close()
-
-
-if __name__ == "__main__":
-    sys.exit(main())

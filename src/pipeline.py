@@ -2,21 +2,16 @@
 End-to-end ingestion pipeline.
 
   1. Discover high-ELO Faceit players via the public API
-  2. Visit each match room with Playwright, intercept the demo download URL
+  2. Find each match's demo URL (Playwright matchroom interception, or the Data API)
   3. Download + decompress the .dem
-  4. Parse with awpy, extract events + state snapshots
-  5. Store in SQLite, delete the demo
+  4. Parse with awpy, extract events + state snapshots      ┐
+  5. Store in SQLite in one transaction, delete the demo    ┘ ingest_demo — THE SEAM
 
-Invoked by `main.py scrape` or run directly with `python src/pipeline.py`.
+Invoked by `main.py scrape`. `main.py demo` enters at ingest_demo with a local file.
 """
-import argparse
 import re
-import sys
 import tempfile
-import time
-import traceback
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 import db
 import scraper
@@ -24,23 +19,10 @@ import faceit_api
 import extract as extractor
 import feature_extractor
 import state_sampler
+from scraper import redact_url
 
 # FACEIT match ids look like "1-<uuid>", optionally suffixed "_m1" for BO series.
 _MATCH_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
-
-def redact_url(url: str) -> str:
-    """Drop the query string. FACEIT signed URLs carry their credential there, and
-    `requests` puts the full URL into every HTTPError message."""
-    if not url:
-        return ""
-    try:
-        parts = urlsplit(str(url))
-    except ValueError:
-        return "<unparseable url>"
-    clean = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
-    return f"{clean}?<redacted>" if parts.query else clean
-
 
 # urllib3 embeds only "path?query" in connection-level errors, not the full URL, so a
 # literal replace of the known URL never matches. Strip any query string that shows up.
@@ -61,7 +43,39 @@ def redact_text(text: str, *urls: str) -> str:
     return _QUERY_RE.sub("?<redacted>", out)
 
 
+def ingest_demo(match_id: str, demo_path, demo_url: str | None = None) -> tuple[int, int]:
+    """THE SEAM: parse one local .dem and store its events + states in ONE transaction.
+
+    Every ingestion source ends here — `process_one` after it has downloaded the file,
+    `main.py demo` for a file already on disk. Anything new that produces a `.dem`
+    must call this rather than fork the pipeline. Returns (n_events, n_states).
+
+    `demo_url` is only recorded on the processed_matches row; pass a redacted URL.
+    """
+    print(f"[{match_id}] parsing demo ...")
+    tables      = extractor.extract(str(demo_path))
+    map_name    = tables.get("map_name", "unknown")
+    vis_checker = feature_extractor.build_vis_checker(map_name)
+
+    print(f"[{match_id}] extracting events ...")
+    events = feature_extractor.extract_events(tables, match_id, map_name, vis_checker=vis_checker)
+
+    print(f"[{match_id}] sampling round states ...")
+    states = state_sampler.sample_round_states(tables, match_id, map_name, vis_checker=vis_checker)
+    # Extra states at each instantaneous action's boundaries, so impact attribution
+    # can value the action's own jump rather than the whole second around it.
+    boundary = state_sampler.sample_boundary_states(tables, match_id, events, map_name, vis_checker=vis_checker)
+    if boundary:
+        print(f"[{match_id}] + {len(boundary)} boundary states")
+        states = states + boundary
+
+    print(f"[{match_id}] storing {len(events)} events + {len(states)} states ...")
+    db.store_match(match_id, events, states, map_name, demo_url)
+    return len(events), len(states)
+
+
 def process_one(match_id: str, demo_url: str, source=scraper) -> int:
+    """Download one demo into a temp dir and ingest it. Returns the event count."""
     if not _MATCH_ID_RE.match(match_id or ""):
         raise ValueError(f"refusing unsafe match_id: {match_id!r}")
     if db.is_processed(match_id):
@@ -77,37 +91,16 @@ def process_one(match_id: str, demo_url: str, source=scraper) -> int:
         print(f"[{match_id}] downloading ...")
         source.download_demo(demo_url, demo_path)
 
-        print(f"[{match_id}] parsing demo ...")
-        tables = extractor.extract(str(demo_path))
-
-        map_name    = tables.get("map_name", "unknown")
-        vis_checker = feature_extractor.build_vis_checker(map_name)
-
-        print(f"[{match_id}] extracting events ...")
-        events = feature_extractor.extract_events(tables, match_id, map_name, vis_checker=vis_checker)
-
-        print(f"[{match_id}] sampling round states ...")
-        states = state_sampler.sample_round_states(tables, match_id, map_name, vis_checker=vis_checker)
-        # Extra states at each instantaneous action's boundaries, so impact
-        # attribution can value the action's own jump rather than the whole second.
-        boundary = state_sampler.sample_boundary_states(
-            tables, match_id, events, map_name, vis_checker=vis_checker)
-        if boundary:
-            print(f"[{match_id}] + {len(boundary)} boundary states")
-            states = states + boundary
-
-        print(f"[{match_id}] storing {len(events)} events + {len(states)} states ...")
-        # One transaction: events, states and the processed marker land together or
-        # not at all, so a crash can't leave rows behind that the next run re-inserts.
         # Never persist a signed URL — the Playwright path yields one, and its
         # credential lives in the query string.
-        db.store_match(match_id, events, states, map_name, redact_url(demo_url))
-
+        n_events, _ = ingest_demo(match_id, demo_path, redact_url(demo_url))
         print(f"[{match_id}] done.")
-        return len(events)
+        return n_events
 
 
-def run(min_elo: int = 2500, region: str = "EU", max_players: int = 10, matches_per_player: int = 20, start_offset: int = 0, source: str = "playwright"):
+def run(min_elo: int = 2500, region: str = "EU", max_players: int = 10,
+        matches_per_player: int = 20, start_offset: int = 0, source: str = "playwright") -> int:
+    """Scrape + ingest. Returns the number of failed matches (0 = clean run)."""
     db.init_db()
 
     src = faceit_api if source == "api" else scraper
@@ -150,44 +143,3 @@ def run(min_elo: int = 2500, region: str = "EU", max_players: int = 10, matches_
             print(f"  {mid}: {msg}")
     print(f"db: {s['matches_processed']} matches | {s['total_events']} events | {s['total_states']} states")
     return len(failed)
-
-
-def loop(min_elo: int = 2500, region: str = "EU", interval: int = 3600,
-         source: str = "playwright", max_consecutive_failures: int = 5):
-    consecutive = 0
-    while True:
-        try:
-            run(min_elo=min_elo, region=region, source=source)
-            consecutive = 0
-        except Exception:
-            consecutive += 1
-            # str(e) throws away the traceback, and a bare KeyError prints as just
-            # 'nickname' — useless for diagnosing an unattended run.
-            # format_exc() can carry a signed URL from anywhere in the stack.
-            print(f"run failed ({consecutive}/{max_consecutive_failures}):\n"
-                  f"{redact_text(traceback.format_exc())}")
-            if consecutive >= max_consecutive_failures:
-                print("too many consecutive failures, exiting.")
-                return 1
-        print(f"\nsleeping {interval}s ...")
-        time.sleep(interval)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--min-elo",            type=int, default=2500)
-    parser.add_argument("--region",             default="EU")
-    parser.add_argument("--max-players",        type=int, default=10)
-    parser.add_argument("--matches-per-player", type=int, default=20)
-    parser.add_argument("--loop",               action="store_true")
-    parser.add_argument("--interval",           type=int, default=3600)
-    parser.add_argument("--start-offset",       type=int, default=0)
-    parser.add_argument("--source",             choices=["playwright", "api"], default="playwright")
-    args = parser.parse_args()
-
-    if args.loop:
-        sys.exit(loop(args.min_elo, args.region, args.interval, source=args.source) or 0)
-    else:
-        n_failed = run(args.min_elo, args.region, args.max_players,
-                       args.matches_per_player, args.start_offset, source=args.source)
-        sys.exit(1 if n_failed else 0)

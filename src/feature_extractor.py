@@ -17,10 +17,17 @@ Output rows are stored in the `events` table; `score_impact.py` later fills
 p_before, p_after, impact using the win-probability model.
 """
 
+import bisect
 import math
+
+import numpy as np
+import pandas as pd
 
 
 def _nan(v) -> bool:
+    """True for None and NaN (any float-like). Shared with state_sampler."""
+    if v is None:
+        return True
     try:
         return math.isnan(float(v))
     except (TypeError, ValueError):
@@ -68,7 +75,7 @@ def _first_valid(*vals):
     """First value that is neither None nor NaN. `or` can't be used on these — NaN is
     truthy, so `official_end or end` never falls through, and 0 is legitimate."""
     for v in vals:
-        if v is not None and not _nan(v):
+        if not _nan(v):
             return v
     return None
 
@@ -102,6 +109,7 @@ SMOKE_LIFE_S   = 18.0   # deployed -> faded
 MOLOTOV_LIFE_S = 7.0    # ignition -> burnt out
 FLASH_EFFECT_S = 0.5    # detonation is effectively instant; blindness is valued
                         # through the kills it enables, which are scored separately
+C4_TIMER       = 40.0   # seconds the bomb burns after a plant (also the post-plant clock)
 
 
 def _ticks(seconds: float, tick_rate: int) -> int:
@@ -210,7 +218,6 @@ def _round_type(equip_value: float, side: str = "t") -> str:
 
 def _tick_slice(df, t_start, t_end):
     """Binary search on a tick-sorted DataFrame. O(log n) instead of O(n) boolean mask."""
-    import numpy as np
     if df is None or df.empty or "tick" not in df.columns:
         return df
     ticks = df["tick"].to_numpy()
@@ -220,7 +227,8 @@ def _tick_slice(df, t_start, t_end):
 
 
 def _get_tick_snap(ticks_df, tick, window=None, tick_rate: int = 64):
-    import pandas as pd
+    """One row per player at `tick`; falls back to the last row per player within
+    the preceding `window` ticks (default: one second at the demo's tick rate)."""
     window = tick_rate if window is None else window
     if ticks_df.empty or tick is None:
         return pd.DataFrame()
@@ -390,8 +398,6 @@ def _smoke_impact(land_pos, throw_tick, r_ticks_df, r_kills, enemy_side, tick_ra
     Computes smoke impactfulness metrics.
     All metrics are from the perspective of the throwing team (enemy = opposing side).
     """
-    import numpy as np
-
     if land_pos is None or None in land_pos or r_ticks_df is None or r_ticks_df.empty:
         return {}
 
@@ -462,15 +468,12 @@ def _smoke_impact(land_pos, throw_tick, r_ticks_df, r_kills, enemy_side, tick_ra
     enemies_stopped_or_reversed = 0
 
     for name in set(early_pos) & set(late_pos):
-        ex, ey   = early_pos[name]
-        lxe, lye = late_pos[name]
-        d_early  = math.sqrt((ex  - lx) ** 2 + (ey  - ly) ** 2)
-        d_late   = math.sqrt((lxe - lx) ** 2 + (lye - ly) ** 2)
+        d_early = _dist2(early_pos[name], land_pos)
+        d_late  = _dist2(late_pos[name],  land_pos)
         if d_late < d_early:
             enemies_approaching += 1
             if name in after_pos:
-                axe, aye = after_pos[name]
-                d_after  = math.sqrt((axe - lx) ** 2 + (aye - ly) ** 2)
+                d_after = _dist2(after_pos[name], land_pos)
                 if d_after >= d_late:
                     enemies_stopped_or_reversed += 1
 
@@ -587,8 +590,6 @@ def _heard_enemy(
     Checks all sound types (footsteps, gunshots, landings, reloads) from enemies.
     Returns heard_enemy bool and list of heard_sounds with type/direction/distance.
     """
-    import bisect
-
     result = {"heard_enemy": False, "heard_sounds": []}
     if player_pos is None or None in player_pos or tick is None:
         return result
@@ -600,7 +601,6 @@ def _heard_enemy(
     heard_sounds = []
 
     def _check_source(source_df, sound_type: str, range_override=None):
-        import numpy as np
         if source_df is None or source_df.empty:
             return
         recent = _tick_slice(source_df, int(t_start), int(tick))
@@ -638,20 +638,8 @@ def _heard_enemy(
         weapons_col = enemy_rows["weapon"].to_numpy() if sound_type == "gunshot" and "weapon" in enemy_rows.columns else None
 
         for i in in_range_idx:
-            dx, dy = xs[i] - px, ys[i] - py
-            dist = float(dists[i])
-            angle_to_target = math.degrees(math.atan2(dy, dx))
-            facing = -float(player_yaw)
-            relative = (angle_to_target - facing) % 360
-            if relative < 45 or relative >= 315:
-                direction = "front"
-            elif relative < 135:
-                direction = "left"
-            elif relative < 225:
-                direction = "back"
-            else:
-                direction = "right"
-
+            dist        = float(dists[i])
+            direction   = _relative_direction(player_pos, player_yaw, (xs[i], ys[i]))
             bucket      = "close" if dist < 200 else "medium" if dist < 500 else "far"
             actual_type = actual_types[i] if actual_types is not None else sound_type
             entry = {"type": actual_type, "direction": direction, "distance": bucket}
@@ -700,7 +688,7 @@ def _round_state(
     Full round state context at a given tick.
     """
     if snap is None:
-        snap = _get_tick_snap(ticks_df, tick)
+        snap = _get_tick_snap(ticks_df, tick, tick_rate=tick_rate)
 
     alive_teammates, alive_enemies = _alive_counts_from_snap(snap, player_name, player_side)
 
@@ -731,14 +719,15 @@ def _round_state(
             )
 
     # Spotted enemies — fast lookup into pre-computed visibility cache
-    spotted = _lookup_spotted(vis_cache, player_name, tick) if vis_cache else []
+    spotted = _lookup_spotted(vis_cache, player_name, tick, tick_rate=tick_rate) if vis_cache else []
 
     # Heard enemy
     p_yaw = player_yaw if player_yaw is not None else 0.0
     heard = _heard_enemy(tick, player_name, player_side, player_pos, p_yaw,
                          footsteps_df, shots_df, reloads_df, ticks_df,
                          precomputed_landings=precomputed_landings,
-                         precomputed_enemy_names=precomputed_enemy_names)
+                         precomputed_enemy_names=precomputed_enemy_names,
+                         tick_rate=tick_rate)
 
     # Bomb position: check C4 carrier in snap only (snap is ≤10 rows)
     bomb_pos = None
@@ -801,8 +790,6 @@ def build_vis_checker(map_name: str):
 
 
 def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_checker=None) -> list[dict]:
-    import pandas as pd
-
     if vis_checker is None:
         vis_checker = build_vis_checker(map_name)
 
@@ -1031,7 +1018,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
         for _, row in r_kills.iterrows():
             tick = row.get("tick")
             t    = secs(tick)
-            snap = _get_tick_snap(r_ticks_df, tick)
+            snap = _get_tick_snap(r_ticks_df, tick, tick_rate=tick_rate)
 
             for role, name_col, side_col, pos_prefix, other_prefix in [
                 ("attacker", "attacker_name", "attacker_side", "attacker_", "victim_"),
@@ -1205,15 +1192,15 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
             except Exception:
                 land_pos = [None, None, None]
 
-            snap   = _get_tick_snap(r_ticks_df, tick)
+            snap   = _get_tick_snap(r_ticks_df, tick, tick_rate=tick_rate)
             rstate = _round_state(
                 tick, thrower, side, pos, yaw,
                 r_ticks_df, r_damages, r_footsteps_df, r_shots_df, r_reloads_df,
                 bomb_ticks, r_freeze, r_offend,
                 precomputed_landings=precomputed_landings,
                 precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache,
-                    tick_rate=tick_rate,
-                )
+                tick_rate=tick_rate,
+            )
 
             ev = _base(side)
             ev.update({
@@ -1307,8 +1294,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                                     (p_all["tick"] % MOVE_SAMPLE_INTERVAL == 0)
                                 ].sort_values("tick")
 
-                                cur_seg_type  = None
-                                cur_seg_start = None
+                                cur_seg_type = None
 
                                 for _, s in window_samples.iterrows():
                                     vel    = _vel_mag(s)
@@ -1332,8 +1318,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                                     if s_type != cur_seg_type:
                                         if cur_seg_type is not None:
                                             movement_types[-1]["to"] = round(s_time, 2)
-                                        cur_seg_type  = s_type
-                                        cur_seg_start = s_time
+                                        cur_seg_type = s_type
                                         movement_types.append({"type": s_type, "from": round(s_time, 2), "to": None})
 
                                 # Close last segment
@@ -1347,15 +1332,15 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                                 made_sound = vel > 250
                                 movement_types = [{"type": s_type, "from": round(t, 2), "to": round(t, 2)}]
 
-                            snap = _get_tick_snap(r_ticks_df, tick)
+                            snap = _get_tick_snap(r_ticks_df, tick, tick_rate=tick_rate)
                             rstate = _round_state(
                                 tick, pname, side, cur_pos, yaw,
                                 r_ticks_df, r_damages, r_footsteps_df, r_shots_df, r_reloads_df,
                                 bomb_ticks, r_freeze, r_offend,
                                 precomputed_landings=precomputed_landings,
                                 precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache,
-                    tick_rate=tick_rate,
-                )
+                                tick_rate=tick_rate,
+                            )
 
                             ev = _base(side)
                             ev.update({
@@ -1393,8 +1378,6 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                     prev_tick = cur_tick
 
         # ── Bomb events (plant / defuse / explode) ──────────────────────────
-        C4_TIMER = 40.0  # seconds
-
         def _bomb_rows(df):
             if df is None or df.empty or "tick" not in df.columns:
                 return df if df is not None else pd.DataFrame()
@@ -1407,8 +1390,8 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
                 bomb_ticks, r_freeze, r_offend,
                 precomputed_landings=precomputed_landings,
                 precomputed_enemy_names=precomputed_enemy_names, snap=snap, vis_cache=vis_cache,
-                    tick_rate=tick_rate,
-                )
+                tick_rate=tick_rate,
+            )
             return {"time_into_round": secs(tick), **rstate}
 
         # Plant
@@ -1419,7 +1402,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
             pos    = [_safe(row.get("user_X")), _safe(row.get("user_Y")), _safe(row.get("user_Z"))]
             yaw    = float(row.get("user_yaw") or 0)
             site   = _safe(row.get("site"), "?")
-            snap   = _get_tick_snap(r_ticks_df, tick)
+            snap   = _get_tick_snap(r_ticks_df, tick, tick_rate=tick_rate)
             ev = _base(pside)
             ev.update({
                 "event_type":      "bomb",
@@ -1449,7 +1432,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
             yaw         = float(row.get("user_yaw") or 0)
             had_kit     = bool(row.get("user_has_defuser", False))
             site        = _safe(row.get("site"), "?")
-            snap        = _get_tick_snap(r_ticks_df, tick)
+            snap        = _get_tick_snap(r_ticks_df, tick, tick_rate=tick_rate)
             defuse_dur  = 5.0 if had_kit else 10.0
             bomb_live_s = round((float(tick) - float(plant_tick)) / tick_rate, 2) if plant_tick else None
             time_left   = round(C4_TIMER - bomb_live_s, 2) if bomb_live_s is not None else None
@@ -1479,7 +1462,7 @@ def extract_events(tables: dict, match_id: str, map_name: str = "unknown", vis_c
         for _, row in _bomb_rows(bomb_explode_df).iterrows():
             tick        = row.get("tick")
             site        = _safe(row.get("site"), "?")
-            snap        = _get_tick_snap(r_ticks_df, tick)
+            snap        = _get_tick_snap(r_ticks_df, tick, tick_rate=tick_rate)
             bomb_live_s = round((float(tick) - float(plant_tick)) / tick_rate, 2) if plant_tick else None
             alive_t, alive_ct = 0, 0
             if snap is not None and not snap.empty:

@@ -18,14 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-PASS = "\033[32m✓\033[0m"
-FAIL = "\033[31m✗\033[0m"
-_results: list[tuple[bool, str]] = []
-
-
-def check(desc: str, ok: bool, detail: str = ""):
-    _results.append((bool(ok), desc))
-    print(f"  {PASS if ok else FAIL}  {desc}" + (f"  ({detail})" if detail else ""))
+from _harness import check, summary
 
 
 def main() -> int:
@@ -51,7 +44,7 @@ def main() -> int:
 
     if not ctxs:
         check("demo yields at least one round context", False)
-        return _summary()
+        return summary()
 
     ctx = max(ctxs, key=lambda c: c.r_end - c.r_start)
 
@@ -150,19 +143,7 @@ def main() -> int:
           all(s["ct_spread"] is None for s in grid if s["alive_ct"] < 2))
     check("no state has both sides eliminated", all(s["alive_ct"] or s["alive_t"] for s in grid))
 
-    return _summary()
-
-
-def _summary() -> int:
-    passed = sum(1 for ok, _ in _results if ok)
-    failed = [d for ok, d in _results if not ok]
-    print(f"\n{'─'*60}\n  {passed}/{len(_results)} passed")
-    if failed:
-        print("  Failed:")
-        for d in failed:
-            print(f"    - {d}")
-    print()
-    return 0 if not failed else 1
+    return summary()
 
 
 if __name__ == "__main__":

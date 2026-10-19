@@ -88,13 +88,14 @@ Faceit API  ->  Playwright session  ->  .dem download     (--source playwright)
 
 ```bash
 python3.11 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements.txt -c requirements.lock
 
 echo "FACEIT_API_KEY=your_key_here" > .env   # from developers.faceit.com
 ```
 
 Examples below use `.venv/bin/python` explicitly — bare `python` is not guaranteed
 to be this interpreter, and mixing interpreters produces confusing numpy import errors.
+On Windows the interpreter is `.venv\Scripts\python.exe`.
 
 **If you use the Playwright scraper** (`--source playwright`, the default), note:
 
@@ -130,12 +131,6 @@ Downloads access granted.
 .venv/bin/python src/main.py top -n 10
 .venv/bin/python src/main.py round <match_id> 5 --engagements-only
 ```
-
-> **Known issue on a brand-new database:** `db._init_schema` does not yet declare
-> the `p_before` / `p_after` / `impact` columns that `score` writes and that
-> `status` / `top` read, so steps 4 and 5 fail on a freshly-created DB with
-> `no such column: impact`. `.venv/bin/python test/test_invariants.py` reports
-> this (and the converse drift on an older DB). A migration is pending.
 
 Larger runs are the same command with bigger numbers — `--max-players 20
 --matches-per-player 30` will yield a couple-hundred matches over a few
@@ -208,13 +203,22 @@ src/
   feature_extractor.py     pulls decision events (buy / engagement / util / rotation / bomb)
   state_sampler.py         samples team state every ~1 s
   win_probability.py       LightGBM WP model (train / load / predict)
-  score_impact.py          fills p_before / p_after / impact in events table
-  db.py                    SQLite schema + insert helpers
+  attribution.py           event-boundary attribution engine (pure; conservation-checked)
+  score_impact.py          fills p_before / p_after / impact (grid or event attribution)
+  db.py                    SQLite schema, migrations, one-transaction store_match
 
-test/                      plain scripts, not pytest — run each directly
-  test_invariants.py       schema + feature-parity checks (stdlib only, no model needed)
+test/                      plain scripts, not pytest — `run_all.py` runs them all
+  run_all.py               runs every test, tallies pass / fail / skipped
+  test_invariants.py       schema + feature-parity + redaction checks (stdlib only)
+  test_db.py               fresh schema, migrations, store_match atomicity (stdlib only)
+  test_attribution.py      attribution engine on synthetic WP paths
+  test_feature_extractor.py / test_state_sampler.py / test_pipeline.py / test_score_impact.py
+                           extractor, sampler, seam and scorer on a synthetic demo (no awpy)
+  test_download.py         download validation against a local HTTP server
+  test_attribution_windows.py / test_build_state.py   contract checks on a real .dem
   test_win_probability.py  WP output properties incl. a calibration check; needs a model
-  test_local_demo.py       inspection script for a local .dem; --write-db to store
+  test_attribution_integration.py / test_attribution_compare.py   need DB + model
+  test_local_demo.py       inspection script for a local .dem (writes nothing)
   test_scraper.py          manual check for demo URL discovery; opens real Chrome
 
 docs/reviews/              dated codebase audits
